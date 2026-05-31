@@ -52,6 +52,19 @@ export async function crawlRow(row, options = {}) {
     if (pages.length >= 4) break;
   }
 
+  if (inputUrl && pages.length === 0) {
+    for (const url of buildCandidateUrls(row.brandName, '')) {
+      const html = await fetchPage(url, options);
+      if (!html || !isSearchPage(url)) continue;
+      const discovered = pickSearchResultLinks(url, html).slice(0, 3);
+      for (const discoveredUrl of discovered) {
+        const discoveredHtml = await fetchPage(discoveredUrl, options);
+        if (discoveredHtml) pages.push({ url: discoveredUrl, html: discoveredHtml });
+      }
+      if (pages.length) break;
+    }
+  }
+
   const combined = pages.map((page) => visibleText(page.html)).join('\n');
   const contacts = extractContacts(combined);
   const bestUrl = chooseBestUrl(inputUrl, pages);
