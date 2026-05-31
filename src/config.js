@@ -7,6 +7,9 @@ export const DEFAULTS = {
   concurrency: Number(process.env.CONCURRENCY || 3),
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 12000),
   overwrite: String(process.env.OVERWRITE || '').toLowerCase() === 'true',
+  excludeSheetName: process.env.EXCLUDE_SHEET_NAME || '영업금지리스트',
+  excludeHeaderRow: Number(process.env.EXCLUDE_HEADER_ROW || 4),
+  excludeDataStartRow: Number(process.env.EXCLUDE_DATA_START_ROW || 5),
 };
 
 export function parseArgs(argv) {

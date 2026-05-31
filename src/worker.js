@@ -2,6 +2,7 @@
 import { DEFAULTS, getSpreadsheetId } from './config.js';
 import { getSheetsClient } from './googleAuth.js';
 import { crawlRows } from './crawler.js';
+import { loadExclusions } from './exclusions.js';
 import { getPendingJobs, readSheetContext, updateBrandRows, updateJobStatus } from './sheets.js';
 
 async function main() {
@@ -10,6 +11,12 @@ async function main() {
   if (!spreadsheetId) throw new Error('SPREADSHEET_URL이 필요합니다.');
 
   const sheets = await getSheetsClient();
+  const exclusions = await loadExclusions(sheets, {
+    spreadsheetUrl: process.env.EXCLUDE_SPREADSHEET_URL,
+    sheetName: process.env.EXCLUDE_SHEET_NAME || DEFAULTS.excludeSheetName,
+    headerRow: process.env.EXCLUDE_HEADER_ROW || DEFAULTS.excludeHeaderRow,
+    dataStartRow: process.env.EXCLUDE_DATA_START_ROW || DEFAULTS.excludeDataStartRow,
+  });
   const jobs = await getPendingJobs(sheets, spreadsheetId, jobsSheetName);
   console.log(`대기 중인 작업: ${jobs.length}개`);
 
@@ -22,10 +29,19 @@ async function main() {
         endRow,
         limit: job.limit || 50,
       });
-      const rows = context.rows.filter((row) => row.brandName && (job.overwrite || !row.brandUrl || !row.phone || !row.email));
+      let excludedCount = 0;
+      const rows = context.rows.filter((row) => {
+        if (!row.brandName) return false;
+        const exclusion = exclusions.isExcluded(row);
+        if (exclusion.excluded) {
+          excludedCount += 1;
+          return false;
+        }
+        return job.overwrite || !row.brandUrl || !row.phone || !row.email;
+      });
       const results = await crawlRows(rows);
       await updateBrandRows(sheets, spreadsheetId, job.sheetName, context.columns, results, { overwrite: job.overwrite });
-      await updateJobStatus(sheets, spreadsheetId, jobsSheetName, job, 'DONE', `${results.length}개 행 업데이트`);
+      await updateJobStatus(sheets, spreadsheetId, jobsSheetName, job, 'DONE', `${results.length}개 행 업데이트, ${excludedCount}개 행 제외`);
     } catch (error) {
       await updateJobStatus(sheets, spreadsheetId, jobsSheetName, job, 'FAILED', error.message);
     }
