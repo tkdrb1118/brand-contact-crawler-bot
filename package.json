@@ -1,0 +1,23 @@
+{
+  "name": "brand-contact-crawler-bot",
+  "version": "0.1.0",
+  "description": "Crawl brand store URLs, phone numbers, and emails into Google Sheets.",
+  "type": "module",
+  "private": false,
+  "scripts": {
+    "crawl": "node src/cli.js",
+    "worker": "node src/worker.js",
+    "test": "node --test"
+  },
+  "bin": {
+    "brand-contact-crawler": "src/cli.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "googleapis": "^173.0.0",
+    "p-limit": "^6.2.0"
+  },
+  "devDependencies": {}
+}
