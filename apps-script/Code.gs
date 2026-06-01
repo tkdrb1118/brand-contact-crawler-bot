@@ -2,6 +2,8 @@ const CONFIG = {
   menuName: '브랜드 DB 수집',
   batchSize: 30,
   triggerMinutes: 10,
+  targetSpreadsheetId: '14_wDg1O9qfNaCtgQU8FJQVj_3ItCFVykMbdWXHd5Mxo',
+  targetSheetName: '김윤아',
   headerRow: 2,
   dataStartRow: 3,
   excludeSpreadsheetId: '1o1ji4gYXu9iPqBNZaWOBhPH8wMjlpz3jRMXWoDrnux8',
@@ -43,9 +45,12 @@ const SHARED_HOSTS = {
 };
 
 function onOpen() {
-  SpreadsheetApp.getUi()
+  const ui = getUiOrNull_();
+  if (!ui) return;
+  ui
     .createMenu(CONFIG.menuName)
     .addItem('30개 즉시 수집', 'runCrawlerBatch')
+    .addItem('자동화 초기 설정', 'setupAutomation')
     .addItem('자동 트리거 설치(10분마다 30개)', 'installBatchTrigger')
     .addItem('자동 트리거 중지', 'removeBatchTriggers')
     .addSeparator()
@@ -58,6 +63,18 @@ function onOpen() {
     .addToUi();
 }
 
+function setupAutomation() {
+  setConfiguredTarget_();
+  removeBatchTriggers();
+  ScriptApp.newTrigger('runCrawlerBatch')
+    .timeBased()
+    .everyMinutes(CONFIG.triggerMinutes)
+    .create();
+  const message = `설정 완료: ${CONFIG.triggerMinutes}분마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`;
+  notify_(message);
+  return message;
+}
+
 function installBatchTrigger() {
   setActiveSheetAsTarget();
   removeBatchTriggers();
@@ -65,7 +82,7 @@ function installBatchTrigger() {
     .timeBased()
     .everyMinutes(CONFIG.triggerMinutes)
     .create();
-  SpreadsheetApp.getUi().alert(`자동 트리거를 설치했습니다. ${CONFIG.triggerMinutes}분마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`);
+  notify_(`자동 트리거를 설치했습니다. ${CONFIG.triggerMinutes}분마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`);
 }
 
 function removeBatchTriggers() {
@@ -75,17 +92,29 @@ function removeBatchTriggers() {
 }
 
 function setActiveSheetAsTarget() {
-  const sheet = SpreadsheetApp.getActiveSheet();
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (!active) {
+    setConfiguredTarget_();
+    notify_(`수집 대상 시트: ${CONFIG.targetSheetName}`);
+    return;
+  }
+  const sheet = active.getActiveSheet();
   PropertiesService.getDocumentProperties().setProperty('TARGET_SHEET_NAME', sheet.getName());
-  SpreadsheetApp.getActive().toast(`수집 대상 시트: ${sheet.getName()}`, CONFIG.menuName, 5);
+  PropertiesService.getDocumentProperties().setProperty('TARGET_SPREADSHEET_ID', active.getId());
+  notify_(`수집 대상 시트: ${sheet.getName()}`);
 }
 
 function resetCrawlerState() {
   PropertiesService.getDocumentProperties().deleteProperty('NEXT_ROW');
-  SpreadsheetApp.getActive().toast('진행 상태를 3행부터 다시 시작하도록 초기화했습니다.', CONFIG.menuName, 5);
+  notify_('진행 상태를 3행부터 다시 시작하도록 초기화했습니다.');
 }
 
 function openRunLog() {
+  if (!SpreadsheetApp.getActiveSpreadsheet()) {
+    getRunLogSheet_();
+    notify_('실행 로그 시트를 생성/확인했습니다. 대상 Google Sheet에서 확인하세요.');
+    return;
+  }
   SpreadsheetApp.setActiveSheet(getRunLogSheet_());
 }
 
@@ -107,12 +136,12 @@ function disableGithubSync() {
   const props = PropertiesService.getScriptProperties();
   props.deleteProperty('GITHUB_REPO');
   props.deleteProperty('GITHUB_TOKEN');
-  SpreadsheetApp.getUi().alert('GitHub 자동 로그 동기화를 해제했습니다.');
+  notify_('GitHub 자동 로그 동기화를 해제했습니다.');
 }
 
 function runCrawlerBatch() {
   const startedAt = new Date();
-  const ss = SpreadsheetApp.getActive();
+  const ss = getTargetSpreadsheet_();
   const sheet = getTargetSheet_();
   const columns = resolveTargetColumns_(sheet);
   const exclusions = loadExclusions_();
@@ -173,12 +202,24 @@ function runCrawlerBatch() {
   summary.finishedAt = new Date().toISOString();
   appendRunLog_(summary);
   syncGithubRunLog_(summary);
-  ss.toast(`처리 ${summary.processed}개, 업데이트 ${summary.updated}개, 제외 ${summary.skippedExcluded}개`, CONFIG.menuName, 8);
+  notify_(`처리 ${summary.processed}개, 업데이트 ${summary.updated}개, 제외 ${summary.skippedExcluded}개`);
+}
+
+function setConfiguredTarget_() {
+  const props = PropertiesService.getDocumentProperties();
+  props.setProperty('TARGET_SPREADSHEET_ID', CONFIG.targetSpreadsheetId);
+  props.setProperty('TARGET_SHEET_NAME', CONFIG.targetSheetName);
+}
+
+function getTargetSpreadsheet_() {
+  const props = PropertiesService.getDocumentProperties();
+  const spreadsheetId = props.getProperty('TARGET_SPREADSHEET_ID') || CONFIG.targetSpreadsheetId;
+  return SpreadsheetApp.openById(spreadsheetId);
 }
 
 function getTargetSheet_() {
-  const ss = SpreadsheetApp.getActive();
-  const targetName = PropertiesService.getDocumentProperties().getProperty('TARGET_SHEET_NAME');
+  const ss = getTargetSpreadsheet_();
+  const targetName = PropertiesService.getDocumentProperties().getProperty('TARGET_SHEET_NAME') || CONFIG.targetSheetName;
   if (targetName && ss.getSheetByName(targetName)) return ss.getSheetByName(targetName);
   return ss.getActiveSheet();
 }
@@ -397,7 +438,7 @@ function appendRunLog_(summary) {
 }
 
 function getRunLogSheet_() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.logSheetName);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.logSheetName);
@@ -441,6 +482,27 @@ function syncGithubRunLog_(summary) {
     },
     payload: JSON.stringify(payload),
   });
+}
+
+function getUiOrNull_() {
+  try {
+    return SpreadsheetApp.getUi();
+  } catch (error) {
+    return null;
+  }
+}
+
+function notify_(message) {
+  const ui = getUiOrNull_();
+  if (ui) {
+    ui.alert(message);
+    return;
+  }
+  try {
+    getTargetSpreadsheet_().toast(message, CONFIG.menuName, 8);
+  } catch (error) {
+    Logger.log(message);
+  }
 }
 
 function findHeader_(headers, candidates) {

@@ -13,9 +13,11 @@ Google Sheets의 `브랜드명`, `브랜드URL`, `연락처`, `이메일` 컬럼
 
 1. 대상 Google Sheet에서 `확장 프로그램` > `Apps Script`를 엽니다.
 2. `apps-script/Code.gs` 전체 내용을 붙여넣고 저장합니다.
-3. Apps Script 편집기에서 `onOpen`을 한 번 실행하고 권한을 승인합니다.
-4. 시트를 새로고침합니다.
-5. 상단 메뉴 `브랜드 DB 수집`을 사용합니다.
+3. Apps Script 편집기 함수 드롭다운에서 `setupAutomation`을 선택해 실행하고 권한을 승인합니다.
+4. `setupAutomation`은 대상 시트 ID를 저장하고 10분마다 30개씩 실행되는 트리거를 설치합니다.
+5. 시트가 bound script로 연결된 경우에는 새로고침 후 상단 메뉴 `브랜드 DB 수집`도 사용할 수 있습니다.
+
+주의: Apps Script 편집기에서 `onOpen`을 직접 실행하지 마세요. `onOpen`은 시트가 열릴 때 메뉴를 만들기 위한 함수라 독립 실행 컨텍스트에서는 `Cannot call SpreadsheetApp.getUi()` 오류가 날 수 있습니다.
 
 메뉴:
 
