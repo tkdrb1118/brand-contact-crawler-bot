@@ -360,8 +360,11 @@ function createControlSheet_() {
 
 function formatRunSummary_(summary) {
   const endRow = Math.max(summary.lastScannedRow || summary.nextRow - 1, summary.startRow);
-  const suffix = summary.reachedEnd ? ' / 마지막 행 도달' : (summary.stoppedByTimeLimit ? ' / 시간보호 중단' : '');
-  return `행 ${summary.startRow}~${endRow} / 처리 ${summary.processed}개 / 업데이트 ${summary.updated}개 / 제외 ${summary.skippedExcluded}개 / 무효URL ${summary.invalidBrandStoreUrls}개${suffix}`;
+  const noTargets = summary.processed === 0 && summary.skippedComplete > 0 && summary.reachedEnd;
+  const suffix = noTargets
+    ? ' / 수집 대상 없음'
+    : (summary.reachedEnd ? ' / 마지막 행 도달' : (summary.stoppedByTimeLimit ? ' / 시간보호 중단' : ''));
+  return `행 ${summary.startRow}~${endRow} / 스캔 ${summary.scanned}개 / 수집 ${summary.processed}개 / 업데이트 ${summary.updated}개 / 완성행스킵 ${summary.skippedComplete}개 / 제외 ${summary.skippedExcluded}개 / 무효URL ${summary.invalidBrandStoreUrls}개${suffix}`;
 }
 
 function updateControlSheetResult_(summary) {
