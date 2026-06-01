@@ -19,7 +19,8 @@ const CONFIG = {
   invalidUrlLogSheetName: '_brandCrawlerInvalidUrls',
   requestTimeoutMs: 7000,
   maxPagesPerBrand: 2,
-  maxRuntimeMs: 5 * 60 * 1000,
+  maxRuntimeMs: 4 * 60 * 1000,
+  runtimeStopBufferMs: 45 * 1000,
   overwrite: false,
   refreshExisting: true,
   defaultGithubRepo: 'tkdrb1118/brand-contact-crawler-bot',
@@ -225,6 +226,7 @@ function runCrawlerBatch() {
     skippedExcluded: 0,
     skippedComplete: 0,
     invalidBrandStoreUrls: 0,
+    stoppedByTimeLimit: false,
     errors: [],
   };
 
@@ -240,8 +242,9 @@ function runCrawlerBatch() {
   }
 
   for (let rowNumber = nextRow; rowNumber <= lastRow; rowNumber += 1) {
-    if (summary.processed >= CONFIG.batchSize || Date.now() >= deadline) {
+    if (summary.processed >= CONFIG.batchSize || shouldStopBeforeNextRow_(deadline)) {
       summary.nextRow = rowNumber;
+      summary.stoppedByTimeLimit = summary.processed < CONFIG.batchSize;
       break;
     }
 
@@ -255,6 +258,7 @@ function runCrawlerBatch() {
     if (exclusion.excluded) {
       summary.skippedExcluded += 1;
       appendBlockedMatchLog_(row, exclusion);
+      persistProgress_(summary);
       continue;
     }
 
@@ -267,6 +271,7 @@ function runCrawlerBatch() {
 
     if (!CONFIG.refreshExisting && !CONFIG.overwrite && !row.brandUrlInvalid && row.brandUrl && row.phone && row.email) {
       summary.skippedComplete += 1;
+      persistProgress_(summary);
       continue;
     }
 
@@ -278,16 +283,23 @@ function runCrawlerBatch() {
     } catch (error) {
       summary.errors.push(`row ${rowNumber}: ${error.message}`);
     }
+    persistProgress_(summary);
   }
 
   if (summary.nextRow > lastRow) {
     summary.nextRow = CONFIG.dataStartRow;
     summary.reachedEnd = true;
   }
-  PropertiesService.getDocumentProperties().setProperty('NEXT_ROW', String(summary.nextRow));
+  persistProgress_(summary);
   summary.finishedAt = new Date().toISOString();
+  const skipGithubSync = shouldStopBeforeNextRow_(deadline);
+  if (skipGithubSync) {
+    summary.errors.push('GitHub 로그 동기화는 실행시간 보호를 위해 이번 회차에서 건너뜀');
+  }
   appendRunLog_(summary);
-  syncGithubRunLog_(summary);
+  if (!skipGithubSync) {
+    syncGithubRunLog_(summary);
+  }
   updateControlSheetResult_(summary);
   notify_(formatRunSummary_(summary));
   return summary;
@@ -340,7 +352,7 @@ function createControlSheet_() {
 
 function formatRunSummary_(summary) {
   const endRow = Math.max(summary.lastScannedRow || summary.nextRow - 1, summary.startRow);
-  const suffix = summary.reachedEnd ? ' / 마지막 행 도달' : '';
+  const suffix = summary.reachedEnd ? ' / 마지막 행 도달' : (summary.stoppedByTimeLimit ? ' / 시간보호 중단' : '');
   return `행 ${summary.startRow}~${endRow} / 처리 ${summary.processed}개 / 업데이트 ${summary.updated}개 / 제외 ${summary.skippedExcluded}개 / 무효URL ${summary.invalidBrandStoreUrls}개${suffix}`;
 }
 
@@ -362,6 +374,14 @@ function getLastDataRow_(sheet, columnNumber) {
     if (clean_(values[i][0])) return CONFIG.dataStartRow + i;
   }
   return CONFIG.dataStartRow - 1;
+}
+
+function shouldStopBeforeNextRow_(deadline) {
+  return Date.now() >= deadline - CONFIG.runtimeStopBufferMs;
+}
+
+function persistProgress_(summary) {
+  PropertiesService.getDocumentProperties().setProperty('NEXT_ROW', String(summary.nextRow));
 }
 
 function resolveTargetColumns_(sheet) {
