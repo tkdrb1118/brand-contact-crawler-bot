@@ -20,6 +20,7 @@ const CONFIG = {
   maxPagesPerBrand: 2,
   maxRuntimeMs: 5 * 60 * 1000,
   overwrite: false,
+  refreshExisting: true,
   defaultGithubRepo: 'tkdrb1118/brand-contact-crawler-bot',
 };
 
@@ -246,7 +247,7 @@ function runCrawlerBatch() {
       appendInvalidUrlLog_(row, urlStatus);
     }
 
-    if (!CONFIG.overwrite && !row.brandUrlInvalid && row.brandUrl && row.phone && row.email) {
+    if (!CONFIG.refreshExisting && !CONFIG.overwrite && !row.brandUrlInvalid && row.brandUrl && row.phone && row.email) {
       summary.skippedComplete += 1;
       continue;
     }
@@ -302,13 +303,13 @@ function createControlSheet_() {
   sheet.getRange('A2').setValue('수집 실행');
   sheet.getRange(CONFIG.controlCheckboxCell).insertCheckboxes().setValue(false);
   sheet.getRange('A3').setValue('동작');
-  sheet.getRange('B3').setValue(`체크박스를 누를 때마다 최대 ${CONFIG.batchSize}개 업체 수집`);
+  sheet.getRange('B3').setValue(`체크박스를 누를 때마다 최대 ${CONFIG.batchSize}개 업체 재검증/수집`);
   sheet.getRange('A4').setValue('상태');
   sheet.getRange(CONFIG.controlStatusCell).setValue('대기');
   sheet.getRange('A6').setValue('항상 적용되는 조건');
   sheet.getRange('B6').setValue('영업금지 리스트 브랜드/URL 매칭 시 수집 제외');
   sheet.getRange('B7').setValue('브랜드스토어 URL 404/410 등 사라진 URL이면 기존 URL을 사용하지 않고 재탐색');
-  sheet.getRange('B8').setValue('이미 브랜드URL/연락처/이메일이 모두 있으면 기본적으로 스킵');
+  sheet.getRange('B8').setValue('이미 값이 있어도 버튼 실행 시 30개씩 재검증/재수집');
   sheet.setColumnWidths(1, 4, 220);
   sheet.getRange('A1:D8').setWrap(true);
   sheet.activate();
@@ -337,15 +338,15 @@ function readBrandRow_(sheet, columns, rowNumber) {
 
 function writeBrandResult_(sheet, columns, rowNumber, row, result) {
   let changed = false;
-  if ((CONFIG.overwrite || !row.brandUrl || row.brandUrlInvalid) && result.brandUrl) {
+  if ((CONFIG.overwrite || !row.brandUrl || row.brandUrlInvalid) && result.brandUrl && result.brandUrl !== row.brandUrl) {
     sheet.getRange(rowNumber, columns.brandUrl + 1).setValue(result.brandUrl);
     changed = true;
   }
-  if ((CONFIG.overwrite || !row.phone) && result.phone) {
+  if ((CONFIG.overwrite || CONFIG.refreshExisting || !row.phone) && result.phone && result.phone !== row.phone) {
     sheet.getRange(rowNumber, columns.phone + 1).setValue(result.phone);
     changed = true;
   }
-  if ((CONFIG.overwrite || !row.email) && result.email) {
+  if ((CONFIG.overwrite || CONFIG.refreshExisting || !row.email) && result.email && result.email !== row.email) {
     sheet.getRange(rowNumber, columns.email + 1).setValue(result.email);
     changed = true;
   }

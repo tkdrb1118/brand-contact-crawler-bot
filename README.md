@@ -7,7 +7,7 @@ Google Sheets의 `브랜드명`, `브랜드URL`, `연락처`, `이메일` 컬럼
 - Apps Script 단독 실행: 시트 안의 실행 체크박스를 누를 때마다 최대 30개 업체를 직접 수집합니다.
 - Node.js/Codex 실행: 로컬이나 Codex에서 `npm run crawl`, `npm run worker`로 실행합니다.
 
-기본 동작은 안전하게 `빈 브랜드URL/연락처/이메일`만 채웁니다. 기존 값을 다시 수집해 덮어쓰려면 코드의 `overwrite` 또는 CLI의 `--overwrite`를 사용합니다.
+Apps Script 버튼 실행은 이미 값이 있는 행도 30개씩 재검증/재수집합니다. 기존 브랜드URL은 사라진 URL로 판정될 때만 교체하고, 연락처/이메일은 새로 확인된 값이 기존 값과 다를 때 갱신합니다.
 
 ## Apps Script 설치
 
@@ -53,6 +53,7 @@ Google Sheets의 `브랜드명`, `브랜드URL`, `연락처`, `이메일` 컬럼
 - `blog.naver.com`, `map.naver.com` 같은 공용 플랫폼 도메인은 전체 호스트 제외로 처리하지 않습니다.
 - 매 실행마다 영업금지 리스트와 중복되는 브랜드/URL은 수집하지 않고 `_brandCrawlerBlockedMatches`에 기록합니다.
 - 브랜드스토어 URL이 404/410 또는 사라진 페이지로 확인되면 기존 URL을 신뢰하지 않고 재탐색하며 `_brandCrawlerInvalidUrls`에 기록합니다.
+- 이미 브랜드URL/연락처/이메일이 모두 있는 행도 버튼 실행 시 30개씩 재검증합니다.
 
 ## GitHub 자동 로그 동기화
 
