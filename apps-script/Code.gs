@@ -1,9 +1,11 @@
 const CONFIG = {
   menuName: '브랜드 DB 수집',
   batchSize: 30,
-  triggerMinutes: 10,
   targetSpreadsheetId: '14_wDg1O9qfNaCtgQU8FJQVj_3ItCFVykMbdWXHd5Mxo',
   targetSheetName: '김윤아',
+  controlSheetName: '브랜드DB수집',
+  controlCheckboxCell: 'B2',
+  controlStatusCell: 'B4',
   headerRow: 2,
   dataStartRow: 3,
   excludeSpreadsheetId: '1o1ji4gYXu9iPqBNZaWOBhPH8wMjlpz3jRMXWoDrnux8',
@@ -12,6 +14,8 @@ const CONFIG = {
   excludeDataStartRow: 5,
   stateSheetName: '_brandCrawlerState',
   logSheetName: '_brandCrawlerRuns',
+  blockedLogSheetName: '_brandCrawlerBlockedMatches',
+  invalidUrlLogSheetName: '_brandCrawlerInvalidUrls',
   requestTimeoutMs: 7000,
   maxPagesPerBrand: 2,
   maxRuntimeMs: 5 * 60 * 1000,
@@ -50,9 +54,9 @@ function onOpen() {
   ui
     .createMenu(CONFIG.menuName)
     .addItem('30개 즉시 수집', 'runCrawlerBatch')
-    .addItem('자동화 초기 설정', 'setupAutomation')
-    .addItem('자동 트리거 설치(10분마다 30개)', 'installBatchTrigger')
-    .addItem('자동 트리거 중지', 'removeBatchTriggers')
+    .addItem('실행 버튼 설치/갱신', 'setupAutomation')
+    .addItem('수집 트리거 중지', 'removeBatchTriggers')
+    .addItem('영업금지/URL 유효성 점검', 'auditBlockedAndInvalidUrls')
     .addSeparator()
     .addItem('현재 시트를 수집 대상으로 지정', 'setActiveSheetAsTarget')
     .addItem('진행 상태 초기화', 'resetCrawlerState')
@@ -65,30 +69,49 @@ function onOpen() {
 
 function setupAutomation() {
   setConfiguredTarget_();
+  createControlSheet_();
   removeBatchTriggers();
-  ScriptApp.newTrigger('runCrawlerBatch')
-    .timeBased()
-    .everyMinutes(CONFIG.triggerMinutes)
+  ScriptApp.newTrigger('handleControlEdit')
+    .forSpreadsheet(CONFIG.targetSpreadsheetId)
+    .onEdit()
     .create();
-  const message = `설정 완료: ${CONFIG.triggerMinutes}분마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`;
+  const message = `설정 완료: '${CONFIG.controlSheetName}' 시트의 체크박스를 누를 때마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`;
   notify_(message);
   return message;
 }
 
 function installBatchTrigger() {
-  setActiveSheetAsTarget();
-  removeBatchTriggers();
-  ScriptApp.newTrigger('runCrawlerBatch')
-    .timeBased()
-    .everyMinutes(CONFIG.triggerMinutes)
-    .create();
-  notify_(`자동 트리거를 설치했습니다. ${CONFIG.triggerMinutes}분마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`);
+  return setupAutomation();
 }
 
 function removeBatchTriggers() {
+  const handlers = {
+    runCrawlerBatch: true,
+    handleControlEdit: true,
+  };
   ScriptApp.getProjectTriggers()
-    .filter((trigger) => trigger.getHandlerFunction() === 'runCrawlerBatch')
+    .filter((trigger) => handlers[trigger.getHandlerFunction()])
     .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
+}
+
+function handleControlEdit(e) {
+  if (!e || !e.range) return;
+  const sheet = e.range.getSheet();
+  if (sheet.getName() !== CONFIG.controlSheetName) return;
+  if (e.range.getA1Notation() !== CONFIG.controlCheckboxCell) return;
+  if (String(e.value).toUpperCase() !== 'TRUE') return;
+
+  sheet.getRange(CONFIG.controlStatusCell).setValue(`실행 중: ${new Date()}`);
+  SpreadsheetApp.flush();
+  try {
+    runCrawlerBatch();
+    sheet.getRange(CONFIG.controlStatusCell).setValue(`완료: ${new Date()}`);
+  } catch (error) {
+    sheet.getRange(CONFIG.controlStatusCell).setValue(`오류: ${error.message}`);
+    throw error;
+  } finally {
+    e.range.setValue(false);
+  }
 }
 
 function setActiveSheetAsTarget() {
@@ -116,6 +139,40 @@ function openRunLog() {
     return;
   }
   SpreadsheetApp.setActiveSheet(getRunLogSheet_());
+}
+
+function auditBlockedAndInvalidUrls() {
+  const sheet = getTargetSheet_();
+  const columns = resolveTargetColumns_(sheet);
+  const exclusions = loadExclusions_();
+  const lastRow = sheet.getLastRow();
+  const summary = {
+    blocked: 0,
+    invalidBrandStoreUrls: 0,
+    checked: 0,
+  };
+
+  for (let rowNumber = CONFIG.dataStartRow; rowNumber <= lastRow; rowNumber += 1) {
+    const row = readBrandRow_(sheet, columns, rowNumber);
+    if (!row.brandName) continue;
+    summary.checked += 1;
+
+    const exclusion = exclusions.isExcluded(row);
+    if (exclusion.excluded) {
+      summary.blocked += 1;
+      appendBlockedMatchLog_(row, exclusion);
+    }
+
+    const urlStatus = checkBrandStoreUrl_(row.brandUrl);
+    if (urlStatus.invalid) {
+      summary.invalidBrandStoreUrls += 1;
+      appendInvalidUrlLog_(row, urlStatus);
+    }
+  }
+
+  const message = `점검 완료: ${summary.checked}개 확인, 영업금지 매칭 ${summary.blocked}개, 사라진 브랜드스토어 URL ${summary.invalidBrandStoreUrls}개`;
+  notify_(message);
+  return message;
 }
 
 function configureGithubSync() {
@@ -161,6 +218,7 @@ function runCrawlerBatch() {
     updated: 0,
     skippedExcluded: 0,
     skippedComplete: 0,
+    invalidBrandStoreUrls: 0,
     errors: [],
   };
 
@@ -177,10 +235,18 @@ function runCrawlerBatch() {
     const exclusion = exclusions.isExcluded(row);
     if (exclusion.excluded) {
       summary.skippedExcluded += 1;
+      appendBlockedMatchLog_(row, exclusion);
       continue;
     }
 
-    if (!CONFIG.overwrite && row.brandUrl && row.phone && row.email) {
+    const urlStatus = checkBrandStoreUrl_(row.brandUrl);
+    if (urlStatus.invalid) {
+      summary.invalidBrandStoreUrls += 1;
+      row.brandUrlInvalid = true;
+      appendInvalidUrlLog_(row, urlStatus);
+    }
+
+    if (!CONFIG.overwrite && !row.brandUrlInvalid && row.brandUrl && row.phone && row.email) {
       summary.skippedComplete += 1;
       continue;
     }
@@ -224,6 +290,30 @@ function getTargetSheet_() {
   return ss.getActiveSheet();
 }
 
+function createControlSheet_() {
+  const ss = getTargetSpreadsheet_();
+  let sheet = ss.getSheetByName(CONFIG.controlSheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.controlSheetName, 0);
+  }
+
+  sheet.clear();
+  sheet.getRange('A1:D1').merge().setValue('브랜드 DB 수집 컨트롤').setFontWeight('bold').setFontSize(14);
+  sheet.getRange('A2').setValue('수집 실행');
+  sheet.getRange(CONFIG.controlCheckboxCell).insertCheckboxes().setValue(false);
+  sheet.getRange('A3').setValue('동작');
+  sheet.getRange('B3').setValue(`체크박스를 누를 때마다 최대 ${CONFIG.batchSize}개 업체 수집`);
+  sheet.getRange('A4').setValue('상태');
+  sheet.getRange(CONFIG.controlStatusCell).setValue('대기');
+  sheet.getRange('A6').setValue('항상 적용되는 조건');
+  sheet.getRange('B6').setValue('영업금지 리스트 브랜드/URL 매칭 시 수집 제외');
+  sheet.getRange('B7').setValue('브랜드스토어 URL 404/410 등 사라진 URL이면 기존 URL을 사용하지 않고 재탐색');
+  sheet.getRange('B8').setValue('이미 브랜드URL/연락처/이메일이 모두 있으면 기본적으로 스킵');
+  sheet.setColumnWidths(1, 4, 220);
+  sheet.getRange('A1:D8').setWrap(true);
+  sheet.activate();
+}
+
 function resolveTargetColumns_(sheet) {
   const headers = sheet.getRange(CONFIG.headerRow, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
   return {
@@ -247,7 +337,7 @@ function readBrandRow_(sheet, columns, rowNumber) {
 
 function writeBrandResult_(sheet, columns, rowNumber, row, result) {
   let changed = false;
-  if ((CONFIG.overwrite || !row.brandUrl) && result.brandUrl) {
+  if ((CONFIG.overwrite || !row.brandUrl || row.brandUrlInvalid) && result.brandUrl) {
     sheet.getRange(rowNumber, columns.brandUrl + 1).setValue(result.brandUrl);
     changed = true;
   }
@@ -263,7 +353,8 @@ function writeBrandResult_(sheet, columns, rowNumber, row, result) {
 }
 
 function crawlBrand_(row) {
-  const candidates = buildCandidateUrls_(row.brandName, row.brandUrl);
+  const crawlUrl = row.brandUrlInvalid ? '' : row.brandUrl;
+  const candidates = buildCandidateUrls_(row.brandName, crawlUrl);
   const pages = [];
 
   for (let i = 0; i < candidates.length && pages.length < CONFIG.maxPagesPerBrand; i += 1) {
@@ -291,7 +382,7 @@ function crawlBrand_(row) {
   const text = pages.map((page) => htmlToText_(page.html)).join('\n');
   const contacts = extractContacts_(text);
   return {
-    brandUrl: chooseBestUrl_(row.brandUrl, pages),
+    brandUrl: chooseBestUrl_(crawlUrl, pages),
     phone: contacts.phone || row.phone,
     email: contacts.email || row.email,
   };
@@ -329,6 +420,38 @@ function fetchPage_(url) {
     return response.getContentText('UTF-8');
   } catch (error) {
     return '';
+  }
+}
+
+function checkBrandStoreUrl_(url) {
+  if (!url || !isNaverStore_(url)) return { checked: false, invalid: false };
+  try {
+    const response = UrlFetchApp.fetch(normalizeUrl_(url), {
+      followRedirects: true,
+      muteHttpExceptions: true,
+      validateHttpsCertificates: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
+      },
+    });
+    const status = response.getResponseCode();
+    const body = response.getContentText('UTF-8').slice(0, 3000);
+    if (status === 404 || status === 410) {
+      return { checked: true, invalid: true, status, reason: 'HTTP_NOT_FOUND' };
+    }
+    if (status >= 200 && status < 400) {
+      if (/판매자의 사정으로|존재하지 않는|페이지를 찾을 수|없는 페이지|스토어가 없습니다|요청하신 페이지/i.test(body)) {
+        return { checked: true, invalid: true, status, reason: 'STORE_NOT_AVAILABLE' };
+      }
+      return { checked: true, invalid: false, status, reason: 'OK' };
+    }
+    if (status === 403 || status === 429) {
+      return { checked: true, invalid: false, status, reason: 'CHECK_BLOCKED_NOT_TREATED_AS_INVALID' };
+    }
+    return { checked: true, invalid: status >= 400, status, reason: `HTTP_${status}` };
+  } catch (error) {
+    return { checked: true, invalid: false, status: '', reason: `CHECK_FAILED_${error.message}` };
   }
 }
 
@@ -380,28 +503,28 @@ function loadExclusions_() {
 
   values.slice(CONFIG.excludeDataStartRow - CONFIG.excludeHeaderRow).forEach((row) => {
     extractBrandNames_(row[brandColumn]).forEach((brand) => {
-      brands[normalizeBrandName_(brand)] = true;
+      brands[normalizeBrandName_(brand)] = brand;
     });
     extractUrls_(row[urlColumn]).forEach((url) => {
       const key = normalizeUrlKey_(url);
       const storeId = naverStoreId_(url);
       const host = host_(url);
-      if (key) urlKeys[key] = true;
-      if (storeId) storeIds[storeId] = true;
-      if (host && !SHARED_HOSTS[host]) hosts[host] = true;
+      if (key) urlKeys[key] = url;
+      if (storeId) storeIds[storeId] = url;
+      if (host && !SHARED_HOSTS[host]) hosts[host] = url;
     });
   });
 
   return {
     isExcluded(row) {
       const brand = normalizeBrandName_(row.brandName);
-      if (brand && brands[brand]) return { excluded: true, reason: 'brand' };
+      if (brand && brands[brand]) return { excluded: true, reason: 'brand', value: brands[brand] };
       const urlKey = normalizeUrlKey_(row.brandUrl);
-      if (urlKey && urlKeys[urlKey]) return { excluded: true, reason: 'url' };
+      if (urlKey && urlKeys[urlKey]) return { excluded: true, reason: 'url', value: urlKeys[urlKey] };
       const storeId = naverStoreId_(row.brandUrl);
-      if (storeId && storeIds[storeId]) return { excluded: true, reason: 'naver_store' };
+      if (storeId && storeIds[storeId]) return { excluded: true, reason: 'naver_store', value: storeIds[storeId] };
       const rowHost = host_(row.brandUrl);
-      if (rowHost && hosts[rowHost]) return { excluded: true, reason: 'host' };
+      if (rowHost && hosts[rowHost]) return { excluded: true, reason: 'host', value: hosts[rowHost] };
       return { excluded: false };
     },
   };
@@ -433,16 +556,51 @@ function appendRunLog_(summary) {
     summary.updated,
     summary.skippedExcluded,
     summary.skippedComplete,
+    summary.invalidBrandStoreUrls,
     summary.errors.join('\n'),
   ]);
 }
 
+function appendBlockedMatchLog_(row, exclusion) {
+  const sheet = getOrCreateLogSheet_(CONFIG.blockedLogSheetName, [
+    '기록시각',
+    '행',
+    '브랜드명',
+    '브랜드URL',
+    '차단사유',
+    '매칭값',
+  ]);
+  sheet.appendRow([
+    new Date(),
+    row.rowNumber,
+    row.brandName,
+    row.brandUrl,
+    exclusion.reason || '',
+    exclusion.value || '',
+  ]);
+}
+
+function appendInvalidUrlLog_(row, urlStatus) {
+  const sheet = getOrCreateLogSheet_(CONFIG.invalidUrlLogSheetName, [
+    '기록시각',
+    '행',
+    '브랜드명',
+    '브랜드URL',
+    'HTTP상태',
+    '사유',
+  ]);
+  sheet.appendRow([
+    new Date(),
+    row.rowNumber,
+    row.brandName,
+    row.brandUrl,
+    urlStatus.status || '',
+    urlStatus.reason || '',
+  ]);
+}
+
 function getRunLogSheet_() {
-  const ss = getTargetSpreadsheet_();
-  let sheet = ss.getSheetByName(CONFIG.logSheetName);
-  if (!sheet) {
-    sheet = ss.insertSheet(CONFIG.logSheetName);
-    sheet.getRange(1, 1, 1, 10).setValues([[
+  return getOrCreateLogSheet_(CONFIG.logSheetName, [
       '실행시각',
       '시트',
       '시작행',
@@ -452,8 +610,17 @@ function getRunLogSheet_() {
       '업데이트',
       '제외',
       '완료스킵',
+      '무효URL',
       '오류',
-    ]]);
+    ]);
+}
+
+function getOrCreateLogSheet_(sheetName, headers) {
+  const ss = getTargetSpreadsheet_();
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.hideSheet();
   }
   return sheet;
