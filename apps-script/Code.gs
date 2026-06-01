@@ -6,6 +6,7 @@ const CONFIG = {
   controlSheetName: '브랜드DB수집',
   controlCheckboxCell: 'B2',
   controlStatusCell: 'B4',
+  controlLastResultCell: 'B5',
   headerRow: 2,
   dataStartRow: 3,
   excludeSpreadsheetId: '1o1ji4gYXu9iPqBNZaWOBhPH8wMjlpz3jRMXWoDrnux8',
@@ -105,10 +106,12 @@ function handleControlEdit(e) {
   sheet.getRange(CONFIG.controlStatusCell).setValue(`실행 중: ${new Date()}`);
   SpreadsheetApp.flush();
   try {
-    runCrawlerBatch();
+    const summary = runCrawlerBatch();
     sheet.getRange(CONFIG.controlStatusCell).setValue(`완료: ${new Date()}`);
+    sheet.getRange(CONFIG.controlLastResultCell).setValue(formatRunSummary_(summary));
   } catch (error) {
     sheet.getRange(CONFIG.controlStatusCell).setValue(`오류: ${error.message}`);
+    sheet.getRange(CONFIG.controlLastResultCell).setValue(`오류: ${error.message}`);
     throw error;
   } finally {
     e.range.setValue(false);
@@ -203,7 +206,7 @@ function runCrawlerBatch() {
   const sheet = getTargetSheet_();
   const columns = resolveTargetColumns_(sheet);
   const exclusions = loadExclusions_();
-  const lastRow = sheet.getLastRow();
+  const lastRow = getLastDataRow_(sheet, columns.brandName + 1);
   let nextRow = Number(PropertiesService.getDocumentProperties().getProperty('NEXT_ROW') || CONFIG.dataStartRow);
   if (nextRow < CONFIG.dataStartRow || nextRow > lastRow) nextRow = CONFIG.dataStartRow;
 
@@ -214,6 +217,8 @@ function runCrawlerBatch() {
     sheetName: sheet.getName(),
     startRow: nextRow,
     nextRow,
+    lastScannedRow: nextRow - 1,
+    reachedEnd: false,
     scanned: 0,
     processed: 0,
     updated: 0,
@@ -223,6 +228,17 @@ function runCrawlerBatch() {
     errors: [],
   };
 
+  if (lastRow < CONFIG.dataStartRow) {
+    summary.nextRow = CONFIG.dataStartRow;
+    summary.reachedEnd = true;
+    summary.finishedAt = new Date().toISOString();
+    appendRunLog_(summary);
+    syncGithubRunLog_(summary);
+    updateControlSheetResult_(summary);
+    notify_(formatRunSummary_(summary));
+    return summary;
+  }
+
   for (let rowNumber = nextRow; rowNumber <= lastRow; rowNumber += 1) {
     if (summary.processed >= CONFIG.batchSize || Date.now() >= deadline) {
       summary.nextRow = rowNumber;
@@ -230,6 +246,8 @@ function runCrawlerBatch() {
     }
 
     summary.scanned += 1;
+    summary.lastScannedRow = rowNumber;
+    summary.nextRow = rowNumber + 1;
     const row = readBrandRow_(sheet, columns, rowNumber);
     if (!row.brandName) continue;
 
@@ -260,16 +278,19 @@ function runCrawlerBatch() {
     } catch (error) {
       summary.errors.push(`row ${rowNumber}: ${error.message}`);
     }
-
-    summary.nextRow = rowNumber + 1;
   }
 
-  if (summary.nextRow > lastRow) summary.nextRow = CONFIG.dataStartRow;
+  if (summary.nextRow > lastRow) {
+    summary.nextRow = CONFIG.dataStartRow;
+    summary.reachedEnd = true;
+  }
   PropertiesService.getDocumentProperties().setProperty('NEXT_ROW', String(summary.nextRow));
   summary.finishedAt = new Date().toISOString();
   appendRunLog_(summary);
   syncGithubRunLog_(summary);
-  notify_(`처리 ${summary.processed}개, 업데이트 ${summary.updated}개, 제외 ${summary.skippedExcluded}개`);
+  updateControlSheetResult_(summary);
+  notify_(formatRunSummary_(summary));
+  return summary;
 }
 
 function setConfiguredTarget_() {
@@ -306,6 +327,8 @@ function createControlSheet_() {
   sheet.getRange('B3').setValue(`체크박스를 누를 때마다 최대 ${CONFIG.batchSize}개 업체 재검증/수집`);
   sheet.getRange('A4').setValue('상태');
   sheet.getRange(CONFIG.controlStatusCell).setValue('대기');
+  sheet.getRange('A5').setValue('최근 결과');
+  sheet.getRange(CONFIG.controlLastResultCell).setValue('');
   sheet.getRange('A6').setValue('항상 적용되는 조건');
   sheet.getRange('B6').setValue('영업금지 리스트 브랜드/URL 매칭 시 수집 제외');
   sheet.getRange('B7').setValue('브랜드스토어 URL 404/410 등 사라진 URL이면 기존 URL을 사용하지 않고 재탐색');
@@ -313,6 +336,32 @@ function createControlSheet_() {
   sheet.setColumnWidths(1, 4, 220);
   sheet.getRange('A1:D8').setWrap(true);
   sheet.activate();
+}
+
+function formatRunSummary_(summary) {
+  const endRow = Math.max(summary.lastScannedRow || summary.nextRow - 1, summary.startRow);
+  const suffix = summary.reachedEnd ? ' / 마지막 행 도달' : '';
+  return `행 ${summary.startRow}~${endRow} / 처리 ${summary.processed}개 / 업데이트 ${summary.updated}개 / 제외 ${summary.skippedExcluded}개 / 무효URL ${summary.invalidBrandStoreUrls}개${suffix}`;
+}
+
+function updateControlSheetResult_(summary) {
+  try {
+    const sheet = getTargetSpreadsheet_().getSheetByName(CONFIG.controlSheetName);
+    if (!sheet) return;
+    sheet.getRange(CONFIG.controlLastResultCell).setValue(formatRunSummary_(summary));
+  } catch (error) {
+    Logger.log(`control sheet update failed: ${error.message}`);
+  }
+}
+
+function getLastDataRow_(sheet, columnNumber) {
+  const maxRows = sheet.getLastRow();
+  if (maxRows < CONFIG.dataStartRow) return maxRows;
+  const values = sheet.getRange(CONFIG.dataStartRow, columnNumber, maxRows - CONFIG.dataStartRow + 1, 1).getDisplayValues();
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    if (clean_(values[i][0])) return CONFIG.dataStartRow + i;
+  }
+  return CONFIG.dataStartRow - 1;
 }
 
 function resolveTargetColumns_(sheet) {
