@@ -31,3 +31,12 @@ test('matcher does not exclude whole shared platform hosts', () => {
 
   assert.equal(matcher.isExcluded({ brandName: '다른브랜드', brandUrl: 'https://blog.naver.com/other-brand' }).excluded, false);
 });
+
+test('matcher always excludes manually blocked brands', () => {
+  const matcher = createMatcher([], []);
+
+  assert.equal(matcher.isExcluded({ brandName: '코지마', brandUrl: 'https://brand.naver.com/cozyma/profile' }).excluded, true);
+  assert.equal(matcher.isExcluded({ brandName: '호무로', brandUrl: '' }).excluded, true);
+  assert.equal(matcher.isExcluded({ brandName: '랩노쉬', brandUrl: '' }).excluded, true);
+  assert.equal(matcher.isExcluded({ brandName: '한끼통살', brandUrl: 'https://atemshop.com/' }).excluded, true);
+});

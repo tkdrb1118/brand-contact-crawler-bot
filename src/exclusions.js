@@ -3,6 +3,7 @@ import { normalizeBrandUrl } from './extract.js';
 
 const BRAND_HEADERS = ['광고주 업체명', '브랜드명', '업체명', '광고주'];
 const URL_HEADERS = ['사이트', '브랜드URL', 'URL', 'url'];
+const ALWAYS_EXCLUDED_BRANDS = ['코지마', '호무로', '랩노쉬', '한끼통살'];
 const SHARED_HOSTS = new Set([
   'blog.naver.com',
   'map.naver.com',
@@ -45,7 +46,7 @@ export async function loadExclusions(sheets, options = {}) {
 }
 
 export function createMatcher(brands, urls) {
-  const brandSet = new Set(brands.map(normalizeBrandName).filter(Boolean));
+  const brandSet = new Set([...ALWAYS_EXCLUDED_BRANDS, ...brands].map(normalizeBrandName).filter(Boolean));
   const urlKeys = new Set(urls.map(normalizeUrlKey).filter(Boolean));
   const naverStoreIds = new Set(urls.map(naverStoreId).filter(Boolean));
   const hosts = new Set(urls.map(normalizeHost).filter((host) => host && !SHARED_HOSTS.has(host)));

@@ -103,6 +103,71 @@ const DISCOVERY_FALLBACK_STORES = [
   'https://smartstore.naver.com/ventilationmall',
 ];
 
+const DISCOVERY_FALLBACK_BRAND_NAMES = {
+  pulmuone_cooking: '풀무원',
+  clickstore: '클릭스토어',
+  jadamteo: '자담터',
+  cosmoenc1: '코스모앤컴퍼니',
+  lequip: '리큅',
+  kdnavien: '경동나비엔',
+  braunhousehold: '브라운하우스홀드',
+  designers: '디자이너스',
+  joasnt: '조아스',
+  inigma: '이니그마',
+  tefal_official: '테팔',
+  ecot: '에콧',
+  '9ooditem': '굿아이템',
+  'modo-home': '모도홈',
+  mionic: '마이오닉',
+  lamostore: '라모스토어',
+  invio: '인비오',
+  phoenix: '피닉스',
+  deximkorea: '덱심코리아',
+  musetech: '뮤즈테크',
+  no1bestshop: '넘버원베스트샵',
+  indderia: '인더리아',
+  'dawon-mall': '다원몰',
+  rosevie: '로즈비',
+  kpage: '케이페이지',
+  homethera: '홈쎄라',
+  cnpcosmetics: '차앤박',
+  joncare: '존케어',
+  da_room: '다룸',
+  wellsing: '웰싱',
+  ecoce_shop: '에코체',
+  celticmall: '셀틱몰',
+  smegkorea: '스메그코리아',
+  nespressokorea: '네스프레소',
+  breville: '브레빌',
+  delonghikorea: '드롱기',
+  themachine: '더머신',
+  lineup: '라인업',
+  braun: '브라운',
+  narwal: '나르왈',
+  haaneasytech: '한이지테크',
+  roborockstore: '로보락',
+  mgtec: '엠지텍',
+  patech: '파테크',
+  hyundaiquming: '현대큐밍',
+  chungho: '청호나이스',
+  cozyma: '코지마',
+  _blueing: '블루잉',
+  philipsmassage: '필립스 마사지',
+  brams: '브람스',
+  pulio_official: '풀리오',
+  proseller: '프로셀러',
+  ventilationmall: '환기몰',
+};
+
+const ALWAYS_EXCLUDED_BRANDS = ['코지마', '호무로', '랩노쉬', '한끼통살'];
+
+const MANUAL_EXCLUSIONS = [
+  { brandName: '코지마', brandUrl: 'https://brand.naver.com/cozyma/profile' },
+  { brandName: '호무로', brandUrl: '' },
+  { brandName: '랩노쉬', brandUrl: '' },
+  { brandName: '한끼통살', brandUrl: 'https://atemshop.com/' },
+];
+
 const CONTACT_HINTS = [
   'contact',
   'company',
@@ -137,6 +202,7 @@ function onOpen() {
     .addItem('실행 버튼 설치/갱신', 'setupAutomation')
     .addItem('수집 트리거 중지', 'removeBatchTriggers')
     .addItem('영업금지/URL 유효성 점검', 'auditBlockedAndInvalidUrls')
+    .addItem('필수 영업금지 브랜드 동기화', 'syncManualExclusionsToSheet')
     .addSeparator()
     .addItem('현재 시트를 수집 대상으로 지정', 'setActiveSheetAsTarget')
     .addItem('진행 상태 초기화', 'resetCrawlerState')
@@ -150,6 +216,7 @@ function onOpen() {
 function setupAutomation() {
   setConfiguredTarget_();
   resetCrawlerProgress_();
+  tryAppendManualExclusions_();
   createControlSheet_();
   removeBatchTriggers();
   ScriptApp.newTrigger('handleControlEdit')
@@ -159,6 +226,12 @@ function setupAutomation() {
   const message = `설정 완료: '${CONFIG.controlSheetName}' 시트의 체크박스를 누를 때마다 최대 ${CONFIG.batchSize}개 업체를 수집합니다.`;
   notify_(message);
   return message;
+}
+
+function syncManualExclusionsToSheet() {
+  const result = tryAppendManualExclusions_();
+  notify_(result.message);
+  return result;
 }
 
 function installBatchTrigger() {
@@ -576,7 +649,7 @@ function discoverNewBrandRows_(sheet, columns, exclusions, deadline) {
 
     const row = {
       rowNumber: '',
-      brandName: candidate.brandName,
+      brandName: resolveKoreanBrandName_(candidate.brandUrl, candidate.brandName),
       brandUrl: candidate.brandUrl,
       phone: '',
       email: '',
@@ -592,6 +665,13 @@ function discoverNewBrandRows_(sheet, columns, exclusions, deadline) {
     if (exclusion.excluded) {
       summary.skippedExcluded += 1;
       appendBlockedMatchLog_(row, exclusion);
+      continue;
+    }
+
+    const urlStatus = checkBrandStoreUrl_(row.brandUrl);
+    if (urlStatus.invalid) {
+      summary.invalidBrandStoreUrls += 1;
+      appendInvalidUrlLog_(row, urlStatus);
       continue;
     }
 
@@ -675,10 +755,26 @@ function extractDiscoveryCandidates_(html) {
 
 function brandNameFromStoreUrl_(url) {
   const storeId = naverStoreId_(url);
+  if (storeId && DISCOVERY_FALLBACK_BRAND_NAMES[storeId]) return DISCOVERY_FALLBACK_BRAND_NAMES[storeId];
   return storeId
     .replace(/[-_]/g, ' ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
     .trim();
+}
+
+function resolveKoreanBrandName_(url, fallback) {
+  const mapped = brandNameFromStoreUrl_(url);
+  if (hasKorean_(mapped)) return mapped;
+  const html = fetchPage_(url);
+  if (html) {
+    const titleName = extractBrandNameFromPages_([{ url, html }], fallback);
+    if (hasKorean_(titleName)) return titleName;
+  }
+  return mapped || fallback;
+}
+
+function hasKorean_(value) {
+  return /[가-힣]/.test(String(value || ''));
 }
 
 function uniqueCandidates_(candidates) {
@@ -741,8 +837,9 @@ function appendFallbackSeedRows_(sheet, columns, exclusions) {
       summary.scanned += 1;
       continue;
     }
+    const fallbackName = DISCOVERY_FALLBACK_BRAND_NAMES[storeId] || storeId.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim();
     const row = {
-      brandName: storeId.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim(),
+      brandName: resolveKoreanBrandName_(url, fallbackName),
       brandUrl: url.indexOf('/profile') === -1 ? url.replace(/\/$/, '') + '/profile' : url,
       phone: '',
       email: '',
@@ -987,6 +1084,44 @@ function chooseBestUrl_(inputUrl, pages) {
   return pages[0] ? normalizeUrl_(pages[0].url) : '';
 }
 
+function appendManualExclusionsIfMissing_() {
+  const sheet = SpreadsheetApp.openById(CONFIG.excludeSpreadsheetId).getSheetByName(CONFIG.excludeSheetName);
+  const lastRow = sheet.getLastRow();
+  const brandValues = lastRow >= CONFIG.excludeDataStartRow
+    ? sheet.getRange(CONFIG.excludeDataStartRow, 3, lastRow - CONFIG.excludeDataStartRow + 1, 1).getDisplayValues()
+    : [];
+  const existing = {};
+  brandValues.forEach((row) => {
+    extractBrandNames_(row[0]).forEach((brand) => {
+      const key = normalizeBrandName_(brand);
+      if (key) existing[key] = true;
+    });
+  });
+
+  let added = 0;
+  MANUAL_EXCLUSIONS.forEach((entry) => {
+    const key = normalizeBrandName_(entry.brandName);
+    if (!key || existing[key]) return;
+    sheet.appendRow(['6/1', 'Codex 제외', entry.brandName, entry.brandUrl, '']);
+    existing[key] = true;
+    added += 1;
+  });
+  return added;
+}
+
+function tryAppendManualExclusions_() {
+  try {
+    const added = appendManualExclusionsIfMissing_();
+    return { ok: true, added, message: `필수 영업금지 브랜드 동기화 완료: ${added}개 추가` };
+  } catch (error) {
+    return {
+      ok: false,
+      added: 0,
+      message: `영업금지 시트 쓰기 권한이 없어 코드 내부 제외 목록만 적용됨: ${error.message}`,
+    };
+  }
+}
+
 function loadExclusions_() {
   const sheet = SpreadsheetApp.openById(CONFIG.excludeSpreadsheetId).getSheetByName(CONFIG.excludeSheetName);
   const lastRow = sheet.getLastRow();
@@ -998,6 +1133,10 @@ function loadExclusions_() {
   const urlKeys = {};
   const storeIds = {};
   const hosts = {};
+
+  ALWAYS_EXCLUDED_BRANDS.forEach((brand) => {
+    brands[normalizeBrandName_(brand)] = brand;
+  });
 
   values.slice(CONFIG.excludeDataStartRow - CONFIG.excludeHeaderRow).forEach((row) => {
     extractBrandNames_(row[brandColumn]).forEach((brand) => {
