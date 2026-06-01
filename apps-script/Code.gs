@@ -486,7 +486,7 @@ function runCrawlerBatch() {
     summary.reachedEnd = true;
   }
 
-  if (CONFIG.discoverNewBrands && summary.processed === 0 && summary.reachedEnd && !shouldStopBeforeNextRow_(deadline)) {
+  if (CONFIG.discoverNewBrands && summary.reachedEnd && (summary.processed === 0 || summary.updated === 0) && !shouldStopBeforeNextRow_(deadline)) {
     const discoverySummary = discoverNewBrandRows_(sheet, columns, exclusions, deadline);
     if (discoverySummary.discovered === 0 && !shouldStopBeforeNextRow_(deadline)) {
       const seedSummary = appendFallbackSeedRows_(sheet, columns, exclusions);
@@ -977,6 +977,7 @@ function pickMetaContent_(html, property) {
 function cleanBrandTitle_(value) {
   return clean_(String(value || '')
     .replace(/&amp;/g, '&')
+    .replace(/\s*[:|-]\s*(?:브랜드스토어|스마트스토어).*$/i, '')
     .replace(/\s*[:|-]\s*네이버\s*(?:브랜드스토어|스마트스토어|쇼핑).*$/i, '')
     .replace(/\s*네이버\s*(?:브랜드스토어|스마트스토어|쇼핑).*$/i, '')
     .replace(/\s*공식(?:몰|스토어).*$/i, '')
@@ -1155,6 +1156,7 @@ function loadExclusions_() {
   return {
     isExcluded(row) {
       const brand = normalizeBrandName_(row.brandName);
+      if (isAlwaysExcludedBrandName_(row.brandName)) return { excluded: true, reason: 'manual_brand', value: row.brandName };
       if (brand && brands[brand]) return { excluded: true, reason: 'brand', value: brands[brand] };
       const urlKey = normalizeUrlKey_(row.brandUrl);
       if (urlKey && urlKeys[urlKey]) return { excluded: true, reason: 'url', value: urlKeys[urlKey] };
@@ -1165,6 +1167,15 @@ function loadExclusions_() {
       return { excluded: false };
     },
   };
+}
+
+function isAlwaysExcludedBrandName_(value) {
+  const brand = normalizeBrandName_(value);
+  if (!brand) return false;
+  return ALWAYS_EXCLUDED_BRANDS.some((blocked) => {
+    const blockedBrand = normalizeBrandName_(blocked);
+    return blockedBrand && (brand === blockedBrand || brand.indexOf(blockedBrand) !== -1);
+  });
 }
 
 function extractContacts_(text) {

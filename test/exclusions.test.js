@@ -36,6 +36,7 @@ test('matcher always excludes manually blocked brands', () => {
   const matcher = createMatcher([], []);
 
   assert.equal(matcher.isExcluded({ brandName: '코지마', brandUrl: 'https://brand.naver.com/cozyma/profile' }).excluded, true);
+  assert.equal(matcher.isExcluded({ brandName: '코지마 : 브랜드스토어', brandUrl: '' }).excluded, true);
   assert.equal(matcher.isExcluded({ brandName: '호무로', brandUrl: '' }).excluded, true);
   assert.equal(matcher.isExcluded({ brandName: '랩노쉬', brandUrl: '' }).excluded, true);
   assert.equal(matcher.isExcluded({ brandName: '한끼통살', brandUrl: 'https://atemshop.com/' }).excluded, true);

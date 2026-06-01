@@ -55,6 +55,9 @@ export function createMatcher(brands, urls) {
     size: brandSet.size + urlKeys.size,
     isExcluded(row) {
       const rowBrand = normalizeBrandName(row.brandName);
+      if (isAlwaysExcludedBrandName(row.brandName)) {
+        return { excluded: true, reason: 'manual_brand', value: row.brandName };
+      }
       if (rowBrand && brandSet.has(rowBrand)) {
         return { excluded: true, reason: 'brand', value: row.brandName };
       }
@@ -78,6 +81,15 @@ export function createMatcher(brands, urls) {
       return { excluded: false };
     },
   };
+}
+
+function isAlwaysExcludedBrandName(value) {
+  const brand = normalizeBrandName(value);
+  if (!brand) return false;
+  return ALWAYS_EXCLUDED_BRANDS.some((blocked) => {
+    const blockedBrand = normalizeBrandName(blocked);
+    return blockedBrand && (brand === blockedBrand || brand.includes(blockedBrand));
+  });
 }
 
 export function extractBrandNames(value) {
