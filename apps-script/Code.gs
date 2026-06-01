@@ -24,8 +24,84 @@ const CONFIG = {
   overwrite: false,
   refreshExisting: false,
   collectOnlyMissingRows: true,
+  discoverNewBrands: true,
+  discoverySeedCount: 3,
+  discoverySearchesPerRun: 4,
+  discoveryCandidateLimit: 80,
+  enrichDiscoveredRowsImmediately: false,
   defaultGithubRepo: 'tkdrb1118/brand-contact-crawler-bot',
 };
+
+const DISCOVERY_KEYWORDS = [
+  '생활가전 브랜드스토어',
+  '주방가전 브랜드스토어',
+  '이미용가전 브랜드스토어',
+  '소형가전 스마트스토어',
+  '뷰티디바이스 브랜드스토어',
+  '음식물처리기 브랜드스토어',
+  '커피머신 브랜드스토어',
+  '청소기 브랜드스토어',
+  '헤어드라이어 브랜드스토어',
+  '정수기 브랜드스토어',
+  '마사지기 브랜드스토어',
+  '건강가전 스마트스토어',
+];
+
+const DISCOVERY_FALLBACK_STORES = [
+  'https://brand.naver.com/pulmuone_cooking',
+  'https://smartstore.naver.com/clickstore',
+  'https://smartstore.naver.com/jadamteo',
+  'https://smartstore.naver.com/cosmoenc1',
+  'https://smartstore.naver.com/lequip',
+  'https://brand.naver.com/kdnavien',
+  'https://smartstore.naver.com/braunhousehold',
+  'https://smartstore.naver.com/designers',
+  'https://smartstore.naver.com/joasnt',
+  'https://smartstore.naver.com/inigma',
+  'https://smartstore.naver.com/tefal_official',
+  'https://smartstore.naver.com/ecot',
+  'https://smartstore.naver.com/9ooditem',
+  'https://smartstore.naver.com/modo-home',
+  'https://smartstore.naver.com/mionic',
+  'https://smartstore.naver.com/lamostore',
+  'https://smartstore.naver.com/invio',
+  'https://smartstore.naver.com/phoenix',
+  'https://smartstore.naver.com/deximkorea',
+  'https://smartstore.naver.com/musetech',
+  'https://smartstore.naver.com/no1bestshop',
+  'https://smartstore.naver.com/indderia',
+  'https://smartstore.naver.com/dawon-mall',
+  'https://smartstore.naver.com/rosevie',
+  'https://smartstore.naver.com/kpage',
+  'https://brand.naver.com/homethera',
+  'https://brand.naver.com/cnpcosmetics',
+  'https://smartstore.naver.com/joncare',
+  'https://brand.naver.com/da_room',
+  'https://smartstore.naver.com/wellsing',
+  'https://smartstore.naver.com/ecoce_shop',
+  'https://smartstore.naver.com/celticmall',
+  'https://brand.naver.com/smegkorea',
+  'https://brand.naver.com/nespressokorea',
+  'https://brand.naver.com/breville',
+  'https://smartstore.naver.com/delonghikorea',
+  'https://smartstore.naver.com/themachine',
+  'https://smartstore.naver.com/lineup',
+  'https://brand.naver.com/braun',
+  'https://brand.naver.com/narwal',
+  'https://smartstore.naver.com/haaneasytech',
+  'https://smartstore.naver.com/roborockstore',
+  'https://smartstore.naver.com/mgtec',
+  'https://brand.naver.com/patech',
+  'https://brand.naver.com/hyundaiquming',
+  'https://brand.naver.com/chungho',
+  'https://brand.naver.com/cozyma',
+  'https://smartstore.naver.com/_blueing',
+  'https://smartstore.naver.com/philipsmassage',
+  'https://smartstore.naver.com/brams',
+  'https://brand.naver.com/pulio_official',
+  'https://smartstore.naver.com/proseller',
+  'https://smartstore.naver.com/ventilationmall',
+];
 
 const CONTACT_HINTS = [
   'contact',
@@ -228,11 +304,49 @@ function runCrawlerBatch() {
     skippedExcluded: 0,
     skippedComplete: 0,
     invalidBrandStoreUrls: 0,
+    discovered: 0,
     stoppedByTimeLimit: false,
     errors: [],
   };
 
+  if (CONFIG.discoverNewBrands && !hasRowsNeedingCollection_(sheet, columns)) {
+    const seedSummary = appendFallbackSeedRows_(sheet, columns, exclusions);
+    summary.scanned = seedSummary.scanned;
+    summary.discovered = seedSummary.discovered;
+    summary.updated = seedSummary.discovered;
+    summary.skippedExcluded = seedSummary.skippedExcluded;
+    summary.invalidBrandStoreUrls = seedSummary.invalidBrandStoreUrls || 0;
+    summary.errors = summary.errors.concat(seedSummary.errors);
+    summary.nextRow = CONFIG.dataStartRow;
+    summary.lastScannedRow = lastRow;
+    summary.reachedEnd = true;
+    persistProgress_(summary);
+    summary.finishedAt = new Date().toISOString();
+    appendRunLog_(summary);
+    syncGithubRunLog_(summary);
+    updateControlSheetResult_(summary);
+    notify_(formatRunSummary_(summary));
+    return summary;
+  }
+
   if (lastRow < CONFIG.dataStartRow) {
+    if (CONFIG.discoverNewBrands && !shouldStopBeforeNextRow_(deadline)) {
+      const discoverySummary = discoverNewBrandRows_(sheet, columns, exclusions, deadline);
+      if (discoverySummary.discovered === 0 && !shouldStopBeforeNextRow_(deadline)) {
+        const seedSummary = appendFallbackSeedRows_(sheet, columns, exclusions);
+        discoverySummary.discovered += seedSummary.discovered;
+        discoverySummary.scanned += seedSummary.scanned;
+        discoverySummary.skippedExcluded += seedSummary.skippedExcluded;
+        discoverySummary.invalidBrandStoreUrls = (discoverySummary.invalidBrandStoreUrls || 0) + (seedSummary.invalidBrandStoreUrls || 0);
+        discoverySummary.errors = discoverySummary.errors.concat(seedSummary.errors);
+      }
+      summary.discovered = discoverySummary.discovered;
+      summary.updated += discoverySummary.discovered;
+      summary.scanned += discoverySummary.scanned;
+      summary.skippedExcluded += discoverySummary.skippedExcluded;
+      summary.invalidBrandStoreUrls += discoverySummary.invalidBrandStoreUrls || 0;
+      summary.errors = summary.errors.concat(discoverySummary.errors);
+    }
     summary.nextRow = CONFIG.dataStartRow;
     summary.reachedEnd = true;
     summary.finishedAt = new Date().toISOString();
@@ -298,6 +412,25 @@ function runCrawlerBatch() {
     summary.nextRow = CONFIG.dataStartRow;
     summary.reachedEnd = true;
   }
+
+  if (CONFIG.discoverNewBrands && summary.processed === 0 && summary.reachedEnd && !shouldStopBeforeNextRow_(deadline)) {
+    const discoverySummary = discoverNewBrandRows_(sheet, columns, exclusions, deadline);
+    if (discoverySummary.discovered === 0 && !shouldStopBeforeNextRow_(deadline)) {
+      const seedSummary = appendFallbackSeedRows_(sheet, columns, exclusions);
+      discoverySummary.discovered += seedSummary.discovered;
+      discoverySummary.scanned += seedSummary.scanned;
+      discoverySummary.skippedExcluded += seedSummary.skippedExcluded;
+      discoverySummary.invalidBrandStoreUrls = (discoverySummary.invalidBrandStoreUrls || 0) + (seedSummary.invalidBrandStoreUrls || 0);
+      discoverySummary.errors = discoverySummary.errors.concat(seedSummary.errors);
+    }
+    summary.discovered = discoverySummary.discovered;
+    summary.updated += discoverySummary.discovered;
+    summary.scanned += discoverySummary.scanned;
+    summary.skippedExcluded += discoverySummary.skippedExcluded;
+    summary.invalidBrandStoreUrls += discoverySummary.invalidBrandStoreUrls || 0;
+    summary.errors = summary.errors.concat(discoverySummary.errors);
+  }
+
   persistProgress_(summary);
   summary.finishedAt = new Date().toISOString();
   const skipGithubSync = shouldStopBeforeNextRow_(deadline);
@@ -344,7 +477,7 @@ function createControlSheet_() {
   sheet.getRange('A2').setValue('수집 실행');
   sheet.getRange(CONFIG.controlCheckboxCell).insertCheckboxes().setValue(false);
   sheet.getRange('A3').setValue('동작');
-  sheet.getRange('B3').setValue(`체크박스를 누를 때마다 연락처/이메일/URL이 비어 있는 업체를 최대 ${CONFIG.batchSize}개 수집`);
+  sheet.getRange('B3').setValue(`체크박스를 누를 때마다 기존 빈값 보강 후 신규 브랜드 DB를 최대 ${CONFIG.batchSize}개 발굴/추가`);
   sheet.getRange('A4').setValue('상태');
   sheet.getRange(CONFIG.controlStatusCell).setValue('대기');
   sheet.getRange('A5').setValue('최근 결과');
@@ -352,7 +485,7 @@ function createControlSheet_() {
   sheet.getRange('A6').setValue('항상 적용되는 조건');
   sheet.getRange('B6').setValue('영업금지 리스트 브랜드/URL 매칭 시 수집 제외');
   sheet.getRange('B7').setValue('브랜드스토어 URL 404/410 등 사라진 URL이면 기존 URL을 사용하지 않고 재탐색');
-  sheet.getRange('B8').setValue('이미 브랜드URL/연락처/이메일이 모두 있는 행은 건너뛰고, 비어 있는 행부터 수집');
+  sheet.getRange('B8').setValue('기존 보강 대상이 없으면 네이버 브랜드스토어/스마트스토어 후보를 발굴해 마지막 행 아래에 추가');
   sheet.setColumnWidths(1, 4, 220);
   sheet.getRange('A1:D8').setWrap(true);
   sheet.activate();
@@ -360,11 +493,11 @@ function createControlSheet_() {
 
 function formatRunSummary_(summary) {
   const endRow = Math.max(summary.lastScannedRow || summary.nextRow - 1, summary.startRow);
-  const noTargets = summary.processed === 0 && summary.skippedComplete > 0 && summary.reachedEnd;
+  const noTargets = summary.processed === 0 && summary.discovered === 0 && summary.skippedComplete > 0 && summary.reachedEnd;
   const suffix = noTargets
     ? ' / 수집 대상 없음'
     : (summary.reachedEnd ? ' / 마지막 행 도달' : (summary.stoppedByTimeLimit ? ' / 시간보호 중단' : ''));
-  return `행 ${summary.startRow}~${endRow} / 스캔 ${summary.scanned}개 / 수집 ${summary.processed}개 / 업데이트 ${summary.updated}개 / 완성행스킵 ${summary.skippedComplete}개 / 제외 ${summary.skippedExcluded}개 / 무효URL ${summary.invalidBrandStoreUrls}개${suffix}`;
+  return `행 ${summary.startRow}~${endRow} / 스캔 ${summary.scanned}개 / 보강수집 ${summary.processed}개 / 신규발굴 ${summary.discovered || 0}개 / 업데이트 ${summary.updated}개 / 완성행스킵 ${summary.skippedComplete}개 / 제외 ${summary.skippedExcluded}개 / 무효URL ${summary.invalidBrandStoreUrls}개${suffix}`;
 }
 
 function updateControlSheetResult_(summary) {
@@ -406,6 +539,245 @@ function shouldSkipCompleteRow_(row) {
     && row.brandUrl
     && row.phone
     && row.email;
+}
+
+function hasRowsNeedingCollection_(sheet, columns) {
+  const lastRow = getLastDataRow_(sheet, columns.brandName + 1);
+  if (lastRow < CONFIG.dataStartRow) return false;
+  const values = sheet.getRange(CONFIG.dataStartRow, 1, lastRow - CONFIG.dataStartRow + 1, sheet.getLastColumn()).getDisplayValues();
+  for (let i = 0; i < values.length; i += 1) {
+    const row = {
+      brandName: clean_(values[i][columns.brandName]),
+      brandUrl: clean_(values[i][columns.brandUrl]),
+      phone: clean_(values[i][columns.phone]),
+      email: clean_(values[i][columns.email]),
+    };
+    if (row.brandName && !shouldSkipCompleteRow_(row)) return true;
+  }
+  return false;
+}
+
+function discoverNewBrandRows_(sheet, columns, exclusions, deadline) {
+  const summary = {
+    scanned: 0,
+    discovered: 0,
+    skippedExcluded: 0,
+    invalidBrandStoreUrls: 0,
+    errors: [],
+  };
+  const existing = loadExistingTargetKeys_(sheet, columns);
+  const candidates = discoverBrandCandidates_(deadline);
+  const appendRows = [];
+
+  for (let i = 0; i < candidates.length && appendRows.length < CONFIG.batchSize; i += 1) {
+    if (shouldStopBeforeNextRow_(deadline)) break;
+    const candidate = candidates[i];
+    summary.scanned += 1;
+
+    const row = {
+      rowNumber: '',
+      brandName: candidate.brandName,
+      brandUrl: candidate.brandUrl,
+      phone: '',
+      email: '',
+    };
+    const brandKey = normalizeBrandName_(row.brandName);
+    const urlKey = normalizeUrlKey_(row.brandUrl);
+    const storeId = naverStoreId_(row.brandUrl);
+    if (!row.brandName || !row.brandUrl || existing.brands[brandKey] || existing.urlKeys[urlKey] || existing.storeIds[storeId]) {
+      continue;
+    }
+
+    const exclusion = exclusions.isExcluded(row);
+    if (exclusion.excluded) {
+      summary.skippedExcluded += 1;
+      appendBlockedMatchLog_(row, exclusion);
+      continue;
+    }
+
+    try {
+      const result = CONFIG.enrichDiscoveredRowsImmediately ? crawlBrand_(row) : row;
+      const resolved = {
+        brandName: result.brandName || row.brandName,
+        brandUrl: result.brandUrl || row.brandUrl,
+        phone: result.phone || '',
+        email: result.email || '',
+      };
+      const resolvedBrandKey = normalizeBrandName_(resolved.brandName);
+      const resolvedUrlKey = normalizeUrlKey_(resolved.brandUrl);
+      const resolvedStoreId = naverStoreId_(resolved.brandUrl);
+      if (existing.brands[resolvedBrandKey] || existing.urlKeys[resolvedUrlKey] || existing.storeIds[resolvedStoreId]) continue;
+      appendRows.push(resolved);
+      existing.brands[resolvedBrandKey] = true;
+      existing.urlKeys[resolvedUrlKey] = true;
+      if (resolvedStoreId) existing.storeIds[resolvedStoreId] = true;
+    } catch (error) {
+      summary.errors.push(`discover ${row.brandName}: ${error.message}`);
+    }
+  }
+
+  if (appendRows.length) {
+    appendDiscoveredRows_(sheet, columns, appendRows);
+    summary.discovered = appendRows.length;
+  }
+  return summary;
+}
+
+function discoverBrandCandidates_(deadline) {
+  const prop = PropertiesService.getDocumentProperties();
+  let index = Number(prop.getProperty('DISCOVERY_QUERY_INDEX') || '0');
+  let fallbackIndex = Number(prop.getProperty('DISCOVERY_FALLBACK_INDEX') || '0');
+  const candidates = [];
+
+  for (let i = 0; i < CONFIG.discoveryCandidateLimit && i < DISCOVERY_FALLBACK_STORES.length; i += 1) {
+    const url = normalizeUrl_(DISCOVERY_FALLBACK_STORES[(fallbackIndex + i) % DISCOVERY_FALLBACK_STORES.length]);
+    candidates.push({
+      brandName: brandNameFromStoreUrl_(url),
+      brandUrl: isNaverStore_(url) && url.indexOf('/profile') === -1 ? url.replace(/\/$/, '') + '/profile' : url,
+    });
+  }
+  fallbackIndex = (fallbackIndex + CONFIG.batchSize) % DISCOVERY_FALLBACK_STORES.length;
+
+  for (let attempts = 0; attempts < CONFIG.discoverySearchesPerRun && !shouldStopBeforeNextRow_(deadline); attempts += 1) {
+    const keyword = DISCOVERY_KEYWORDS[index % DISCOVERY_KEYWORDS.length];
+    index += 1;
+    const urls = [
+      `https://search.naver.com/search.naver?query=${encodeURIComponent(keyword)}`,
+      `https://search.naver.com/search.naver?query=${encodeURIComponent(keyword + ' 공식몰')}`,
+    ];
+    urls.forEach((url) => {
+      const html = fetchPage_(url);
+      if (!html) return;
+      candidates.push.apply(candidates, extractDiscoveryCandidates_(html));
+    });
+  }
+
+  prop.setProperty('DISCOVERY_QUERY_INDEX', String(index % DISCOVERY_KEYWORDS.length));
+  prop.setProperty('DISCOVERY_FALLBACK_INDEX', String(fallbackIndex));
+  return uniqueCandidates_(candidates).slice(0, CONFIG.discoveryCandidateLimit);
+}
+
+function extractDiscoveryCandidates_(html) {
+  const candidates = [];
+  const regex = /https?:\/\/(?:brand|smartstore)\.naver\.com\/[A-Za-z0-9._-]+(?:\/profile)?(?:\?[^"'\s<>]*)?/gi;
+  let match;
+  while ((match = regex.exec(String(html || ''))) !== null) {
+    const url = normalizeUrl_(match[0].replace(/\\u0026/g, '&').replace(/&amp;/g, '&'));
+    const storeId = naverStoreId_(url);
+    if (!storeId) continue;
+    candidates.push({
+      brandName: brandNameFromStoreUrl_(url),
+      brandUrl: isNaverStore_(url) && url.indexOf('/profile') === -1 ? url.replace(/\/$/, '') + '/profile' : url,
+    });
+  }
+  return candidates;
+}
+
+function brandNameFromStoreUrl_(url) {
+  const storeId = naverStoreId_(url);
+  return storeId
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+function uniqueCandidates_(candidates) {
+  const seen = {};
+  return candidates.filter((candidate) => {
+    const key = naverStoreId_(candidate.brandUrl) || normalizeUrlKey_(candidate.brandUrl);
+    if (!key || seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+}
+
+function loadExistingTargetKeys_(sheet, columns) {
+  const lastRow = getLastDataRow_(sheet, columns.brandName + 1);
+  const existing = { brands: {}, urlKeys: {}, storeIds: {} };
+  if (lastRow < CONFIG.dataStartRow) return existing;
+  const values = sheet.getRange(CONFIG.dataStartRow, 1, lastRow - CONFIG.dataStartRow + 1, sheet.getLastColumn()).getDisplayValues();
+  values.forEach((row) => {
+    const brand = clean_(row[columns.brandName]);
+    const url = clean_(row[columns.brandUrl]);
+    const brandKey = normalizeBrandName_(brand);
+    const urlKey = normalizeUrlKey_(url);
+    const storeId = naverStoreId_(url);
+    if (brandKey) existing.brands[brandKey] = true;
+    if (urlKey) existing.urlKeys[urlKey] = true;
+    if (storeId) existing.storeIds[storeId] = true;
+  });
+  return existing;
+}
+
+function appendDiscoveredRows_(sheet, columns, rows) {
+  const startRow = Math.max(getLastDataRow_(sheet, columns.brandName + 1) + 1, CONFIG.dataStartRow);
+  rows.forEach((row, index) => {
+    const rowNumber = startRow + index;
+    sheet.getRange(rowNumber, columns.brandName + 1).setValue(row.brandName);
+    sheet.getRange(rowNumber, columns.brandUrl + 1).setValue(row.brandUrl);
+    if (row.phone) sheet.getRange(rowNumber, columns.phone + 1).setValue(row.phone);
+    if (row.email) sheet.getRange(rowNumber, columns.email + 1).setValue(row.email);
+  });
+}
+
+function appendFallbackSeedRows_(sheet, columns, exclusions) {
+  const summary = {
+    scanned: 0,
+    discovered: 0,
+    skippedExcluded: 0,
+    invalidBrandStoreUrls: 0,
+    errors: [],
+  };
+  const existing = loadExistingTargetKeys_(sheet, columns);
+  const rows = [];
+  const prop = PropertiesService.getDocumentProperties();
+  let index = Number(prop.getProperty('DISCOVERY_FORCE_INDEX') || '0');
+
+  for (let i = 0; i < DISCOVERY_FALLBACK_STORES.length && rows.length < CONFIG.batchSize; i += 1) {
+    const url = String(DISCOVERY_FALLBACK_STORES[(index + i) % DISCOVERY_FALLBACK_STORES.length] || '').trim();
+    const storeMatch = url.match(/(?:brand|smartstore)\.naver\.com\/([^/?#]+)/i);
+    const storeId = storeMatch ? storeMatch[1].toLowerCase() : '';
+    if (!storeId) {
+      summary.scanned += 1;
+      continue;
+    }
+    const row = {
+      brandName: storeId.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim(),
+      brandUrl: url.indexOf('/profile') === -1 ? url.replace(/\/$/, '') + '/profile' : url,
+      phone: '',
+      email: '',
+    };
+    summary.scanned += 1;
+
+    if (existing.storeIds[storeId]) continue;
+
+    const exclusion = exclusions.isExcluded(row);
+    if (exclusion.excluded) {
+      summary.skippedExcluded += 1;
+      appendBlockedMatchLog_(row, exclusion);
+      continue;
+    }
+
+    const urlStatus = checkBrandStoreUrl_(row.brandUrl);
+    if (urlStatus.invalid) {
+      summary.invalidBrandStoreUrls += 1;
+      appendInvalidUrlLog_(row, urlStatus);
+      continue;
+    }
+
+    rows.push(row);
+    existing.storeIds[storeId] = true;
+  }
+
+  index = (index + Math.max(summary.scanned, CONFIG.batchSize)) % DISCOVERY_FALLBACK_STORES.length;
+  prop.setProperty('DISCOVERY_FORCE_INDEX', String(index));
+  if (rows.length) {
+    appendDiscoveredRows_(sheet, columns, rows);
+    summary.discovered = rows.length;
+  } else {
+    summary.errors.push('fallback seed candidates were exhausted or blocked before append');
+  }
+  return summary;
 }
 
 function resolveTargetColumns_(sheet) {
@@ -476,10 +848,42 @@ function crawlBrand_(row) {
   const text = pages.map((page) => htmlToText_(page.html)).join('\n');
   const contacts = extractContacts_(text);
   return {
+    brandName: extractBrandNameFromPages_(pages, row.brandName),
     brandUrl: chooseBestUrl_(crawlUrl, pages),
     phone: contacts.phone || row.phone,
     email: contacts.email || row.email,
   };
+}
+
+function extractBrandNameFromPages_(pages, fallback) {
+  for (let i = 0; i < pages.length; i += 1) {
+    const html = pages[i].html;
+    const candidates = [
+      pickMetaContent_(html, 'og:title'),
+      pickMetaContent_(html, 'twitter:title'),
+      (String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1],
+    ];
+    for (let j = 0; j < candidates.length; j += 1) {
+      const name = cleanBrandTitle_(candidates[j]);
+      if (name) return name;
+    }
+  }
+  return fallback;
+}
+
+function pickMetaContent_(html, property) {
+  const pattern = new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i');
+  const reversePattern = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${property}["']`, 'i');
+  return (String(html || '').match(pattern) || String(html || '').match(reversePattern) || [])[1] || '';
+}
+
+function cleanBrandTitle_(value) {
+  return clean_(String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/\s*[:|-]\s*네이버\s*(?:브랜드스토어|스마트스토어|쇼핑).*$/i, '')
+    .replace(/\s*네이버\s*(?:브랜드스토어|스마트스토어|쇼핑).*$/i, '')
+    .replace(/\s*공식(?:몰|스토어).*$/i, '')
+    .trim());
 }
 
 function buildCandidateUrls_(brandName, existingUrl) {
