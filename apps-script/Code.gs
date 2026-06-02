@@ -29,6 +29,9 @@ const CONFIG = {
   discoverySearchesPerRun: 4,
   discoveryCandidateLimit: 80,
   enrichDiscoveredRowsImmediately: false,
+  officialMallSearchesPerBrand: 2,
+  officialMallMaxSitesPerBrand: 2,
+  officialMallMaxContactPagesPerSite: 2,
   defaultGithubRepo: 'tkdrb1118/brand-contact-crawler-bot',
 };
 
@@ -182,6 +185,47 @@ const CONTACT_HINTS = [
   '소개',
   '입점',
   '제휴',
+  '협업',
+  '마케팅',
+  '광고',
+  '대표',
+];
+
+const BUSINESS_EMAIL_HINTS = [
+  '협업',
+  '제휴',
+  '마케팅',
+  '광고',
+  '입점',
+  '대표',
+  'contact',
+  'marketing',
+  'partnership',
+  'partner',
+  'business',
+  'biz',
+  'sales',
+  'pr',
+];
+
+const OFFICIAL_MALL_BLOCKED_HOST_KEYWORDS = [
+  'naver.com',
+  'google.',
+  'daum.net',
+  'kakao.com',
+  'instagram.com',
+  'facebook.com',
+  'youtube.com',
+  'coupang.com',
+  'gmarket.co.kr',
+  'auction.co.kr',
+  '11st.co.kr',
+  'lotteon.com',
+  'ssg.com',
+  'tmon.co.kr',
+  'wemakeprice.com',
+  'interpark.com',
+  'danawa.com',
 ];
 
 const SHARED_HOSTS = {
@@ -416,7 +460,7 @@ function runCrawlerBatch() {
   }
 
   if (CONFIG.discoverNewBrands && summary.discovered === 0 && !shouldStopBeforeNextRow_(deadline)) {
-    const seedSummary = appendFallbackSeedRows_(sheet, columns, exclusions);
+    const seedSummary = appendFallbackSeedRows_(sheet, columns, exclusions, deadline);
     summary.scanned += seedSummary.scanned;
     summary.discovered += seedSummary.discovered;
     summary.updated = seedSummary.discovered;
@@ -595,11 +639,12 @@ function discoverNewBrandRows_(sheet, columns, exclusions, deadline) {
 
     try {
       const result = CONFIG.enrichDiscoveredRowsImmediately ? crawlBrand_(row) : row;
+      const mallContacts = enrichContactsFromOfficialMall_(row, deadline);
       const resolved = {
         brandName: result.brandName || row.brandName,
-        brandUrl: result.brandUrl || row.brandUrl,
-        phone: result.phone || '',
-        email: result.email || '',
+        brandUrl: row.brandUrl,
+        phone: mallContacts.phone || result.phone || '',
+        email: mallContacts.email || result.email || '',
       };
       if (findExistingDuplicate_(resolved, existing).duplicate) continue;
       appendRows.push(resolved);
@@ -751,7 +796,7 @@ function appendDiscoveredRows_(sheet, columns, rows) {
   });
 }
 
-function appendFallbackSeedRows_(sheet, columns, exclusions) {
+function appendFallbackSeedRows_(sheet, columns, exclusions, deadline) {
   const summary = {
     scanned: 0,
     discovered: 0,
@@ -796,6 +841,10 @@ function appendFallbackSeedRows_(sheet, columns, exclusions) {
       appendInvalidUrlLog_(row, urlStatus);
       continue;
     }
+
+    const mallContacts = enrichContactsFromOfficialMall_(row, deadline);
+    row.phone = mallContacts.phone || '';
+    row.email = mallContacts.email || '';
 
     rows.push(row);
     rememberExistingKeys_(row, existing);
@@ -1011,6 +1060,133 @@ function pickSearchResultLinks_(baseUrl, html) {
     if (/brand\.naver\.com|smartstore\.naver\.com|official|mall/i.test(url)) links.push(url);
   }
   return unique_(links).slice(0, 4);
+}
+
+function enrichContactsFromOfficialMall_(row, deadline) {
+  if (deadline && shouldStopBeforeNextRow_(deadline)) return { phone: '', email: '' };
+  const mallUrls = findOfficialMallUrls_(row, deadline);
+  const texts = [];
+
+  for (let i = 0; i < mallUrls.length && i < CONFIG.officialMallMaxSitesPerBrand; i += 1) {
+    if (deadline && shouldStopBeforeNextRow_(deadline)) break;
+    const url = mallUrls[i];
+    const html = fetchPage_(url);
+    if (!html) continue;
+    texts.push(extractFooterOrBottomText_(html));
+
+    const contactLinks = pickContactLinks_(url, html);
+    for (let j = 0; j < contactLinks.length && j < CONFIG.officialMallMaxContactPagesPerSite; j += 1) {
+      if (deadline && shouldStopBeforeNextRow_(deadline)) break;
+      const contactHtml = fetchPage_(contactLinks[j]);
+      if (contactHtml) texts.push(extractFooterOrBottomText_(contactHtml));
+    }
+  }
+
+  return extractOfficialMallContacts_(texts.join('\n'));
+}
+
+function findOfficialMallUrls_(row, deadline) {
+  const urls = [];
+  const queries = [
+    `${row.brandName} 공식몰`,
+    `${row.brandName} 자사몰 고객센터`,
+    `${row.brandName} 마케팅 제휴 이메일`,
+  ];
+
+  for (let i = 0; i < queries.length && i < CONFIG.officialMallSearchesPerBrand; i += 1) {
+    if (deadline && shouldStopBeforeNextRow_(deadline)) break;
+    const searchUrl = `https://search.naver.com/search.naver?query=${encodeURIComponent(queries[i])}`;
+    const html = fetchPage_(searchUrl);
+    if (!html) continue;
+    const candidates = pickOfficialMallLinksFromSearch_(html, row.brandName);
+    urls.push.apply(urls, candidates);
+  }
+
+  return unique_(urls).slice(0, CONFIG.officialMallMaxSitesPerBrand);
+}
+
+function pickOfficialMallLinksFromSearch_(html, brandName) {
+  const links = [];
+  const regex = /href=["'](https?:\/\/[^"']+)["']/gi;
+  let match;
+  while ((match = regex.exec(String(html || ''))) !== null) {
+    const raw = match[1].replace(/\\u0026/g, '&').replace(/&amp;/g, '&');
+    const url = unwrapSearchUrl_(raw);
+    if (isOfficialMallCandidateUrl_(url, brandName)) links.push(normalizeUrl_(url));
+  }
+  return unique_(links);
+}
+
+function unwrapSearchUrl_(url) {
+  try {
+    const parsed = new URL(url);
+    const nested = parsed.searchParams.get('url') || parsed.searchParams.get('u');
+    return nested ? decodeURIComponent(nested) : url;
+  } catch (error) {
+    return url;
+  }
+}
+
+function isOfficialMallCandidateUrl_(url, brandName) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    if (!/^https?:$/i.test(parsed.protocol)) return false;
+    if (!host || host.indexOf('.') === -1) return false;
+    if (isNaverStore_(url) || isSearchPage_(url)) return false;
+    if (OFFICIAL_MALL_BLOCKED_HOST_KEYWORDS.some((keyword) => host.indexOf(keyword) !== -1)) return false;
+    if (/\.(jpg|jpeg|png|gif|webp|pdf|zip)(?:$|\?)/i.test(parsed.pathname)) return false;
+
+    const brandKey = normalizeBrandDuplicateKey_(brandName);
+    const urlText = decodeURIComponent(`${host}${parsed.pathname}`).toLowerCase();
+    if (brandKey && normalizeBrandName_(urlText).indexOf(brandKey) !== -1) return true;
+    return /mall|shop|store|official|brand|korea|co\.kr|com$/i.test(host + parsed.pathname);
+  } catch (error) {
+    return false;
+  }
+}
+
+function extractFooterOrBottomText_(html) {
+  const source = String(html || '');
+  const footerMatches = source.match(/<footer[\s\S]*?<\/footer>/gi) || [];
+  const footerText = footerMatches.map(htmlToText_).join('\n');
+  const allText = htmlToText_(source);
+  const bottomText = allText.slice(Math.max(0, allText.length - 6000));
+  return `${footerText}\n${bottomText}`;
+}
+
+function extractOfficialMallContacts_(text) {
+  const normalized = String(text || '')
+    .replace(/&#64;|&#x40;|&commat;/gi, '@')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s*\[at\]\s*/gi, '@')
+    .replace(/\s*\(at\)\s*/gi, '@');
+  const phone = extractContacts_(normalized).phone;
+  const emails = unique_(extractBusinessEmails_(normalized).filter(isUsableEmail_));
+  return {
+    phone,
+    email: emails.slice(0, 4).join(' / '),
+  };
+}
+
+function extractBusinessEmails_(text) {
+  const normalized = String(text || '');
+  const emails = [];
+  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  let match;
+  while ((match = regex.exec(normalized)) !== null) {
+    const start = Math.max(0, match.index - 140);
+    const end = Math.min(normalized.length, match.index + match[0].length + 140);
+    const context = normalized.slice(start, end).toLowerCase();
+    const local = match[0].split('@')[0].toLowerCase();
+    if (
+      BUSINESS_EMAIL_HINTS.some((hint) => context.indexOf(hint.toLowerCase()) !== -1)
+      || /^(contact|info|marketing|mkt|partner|partnership|business|biz|sales|pr|ad|hello)$/i.test(local)
+    ) {
+      emails.push(match[0]);
+    }
+  }
+  return emails;
 }
 
 function chooseBestUrl_(inputUrl, pages) {
