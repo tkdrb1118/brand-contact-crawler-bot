@@ -203,6 +203,7 @@ function onOpen() {
     .addItem('수집 트리거 중지', 'removeBatchTriggers')
     .addItem('영업금지/URL 유효성 점검', 'auditBlockedAndInvalidUrls')
     .addItem('필수 영업금지 브랜드 동기화', 'syncManualExclusionsToSheet')
+    .addItem('기존 중복 브랜드 정리', 'dedupeExistingBrandRows')
     .addSeparator()
     .addItem('현재 시트를 수집 대상으로 지정', 'setActiveSheetAsTarget')
     .addItem('진행 상태 초기화', 'resetCrawlerState')
@@ -232,6 +233,30 @@ function syncManualExclusionsToSheet() {
   const result = tryAppendManualExclusions_();
   notify_(result.message);
   return result;
+}
+
+function dedupeExistingBrandRows() {
+  const sheet = getTargetSheet_();
+  const columns = resolveTargetColumns_(sheet);
+  const lastRow = getLastDataRow_(sheet, columns.brandName + 1);
+  const seen = { brands: {}, brandDuplicateKeys: {}, urlKeys: {}, storeIds: {} };
+  const rowsToDelete = [];
+
+  for (let rowNumber = CONFIG.dataStartRow; rowNumber <= lastRow; rowNumber += 1) {
+    const row = readBrandRow_(sheet, columns, rowNumber);
+    if (!row.brandName && !row.brandUrl) continue;
+    const duplicate = findExistingDuplicate_(row, seen);
+    if (duplicate.duplicate) {
+      rowsToDelete.push(rowNumber);
+      continue;
+    }
+    rememberExistingKeys_(row, seen);
+  }
+
+  rowsToDelete.reverse().forEach((rowNumber) => sheet.deleteRow(rowNumber));
+  const message = `기존 중복 브랜드 정리 완료: ${rowsToDelete.length}개 행 삭제`;
+  notify_(message);
+  return { deleted: rowsToDelete.length, rows: rowsToDelete.reverse() };
 }
 
 function installBatchTrigger() {
@@ -550,10 +575,7 @@ function discoverNewBrandRows_(sheet, columns, exclusions, deadline) {
       phone: '',
       email: '',
     };
-    const brandKey = normalizeBrandName_(row.brandName);
-    const urlKey = normalizeUrlKey_(row.brandUrl);
-    const storeId = naverStoreId_(row.brandUrl);
-    if (!row.brandName || !row.brandUrl || existing.brands[brandKey] || existing.urlKeys[urlKey] || existing.storeIds[storeId]) {
+    if (!row.brandName || !row.brandUrl || findExistingDuplicate_(row, existing).duplicate) {
       continue;
     }
 
@@ -579,14 +601,9 @@ function discoverNewBrandRows_(sheet, columns, exclusions, deadline) {
         phone: result.phone || '',
         email: result.email || '',
       };
-      const resolvedBrandKey = normalizeBrandName_(resolved.brandName);
-      const resolvedUrlKey = normalizeUrlKey_(resolved.brandUrl);
-      const resolvedStoreId = naverStoreId_(resolved.brandUrl);
-      if (existing.brands[resolvedBrandKey] || existing.urlKeys[resolvedUrlKey] || existing.storeIds[resolvedStoreId]) continue;
+      if (findExistingDuplicate_(resolved, existing).duplicate) continue;
       appendRows.push(resolved);
-      existing.brands[resolvedBrandKey] = true;
-      existing.urlKeys[resolvedUrlKey] = true;
-      if (resolvedStoreId) existing.storeIds[resolvedStoreId] = true;
+      rememberExistingKeys_(resolved, existing);
     } catch (error) {
       summary.errors.push(`discover ${row.brandName}: ${error.message}`);
     }
@@ -685,20 +702,42 @@ function uniqueCandidates_(candidates) {
 
 function loadExistingTargetKeys_(sheet, columns) {
   const lastRow = getLastDataRow_(sheet, columns.brandName + 1);
-  const existing = { brands: {}, urlKeys: {}, storeIds: {} };
+  const existing = { brands: {}, brandDuplicateKeys: {}, urlKeys: {}, storeIds: {} };
   if (lastRow < CONFIG.dataStartRow) return existing;
   const values = sheet.getRange(CONFIG.dataStartRow, 1, lastRow - CONFIG.dataStartRow + 1, sheet.getLastColumn()).getDisplayValues();
   values.forEach((row) => {
     const brand = clean_(row[columns.brandName]);
     const url = clean_(row[columns.brandUrl]);
-    const brandKey = normalizeBrandName_(brand);
-    const urlKey = normalizeUrlKey_(url);
-    const storeId = naverStoreId_(url);
-    if (brandKey) existing.brands[brandKey] = true;
-    if (urlKey) existing.urlKeys[urlKey] = true;
-    if (storeId) existing.storeIds[storeId] = true;
+    rememberExistingKeys_({ brandName: brand, brandUrl: url }, existing);
   });
   return existing;
+}
+
+function findExistingDuplicate_(row, existing) {
+  const brandKey = normalizeBrandName_(row.brandName);
+  if (brandKey && existing.brands[brandKey]) return { duplicate: true, reason: 'brand' };
+
+  const duplicateBrandKey = normalizeBrandDuplicateKey_(row.brandName);
+  if (duplicateBrandKey && existing.brandDuplicateKeys[duplicateBrandKey]) return { duplicate: true, reason: 'brand_duplicate' };
+
+  const urlKey = normalizeUrlKey_(row.brandUrl);
+  if (urlKey && existing.urlKeys[urlKey]) return { duplicate: true, reason: 'url' };
+
+  const storeId = naverStoreId_(row.brandUrl);
+  if (storeId && existing.storeIds[storeId]) return { duplicate: true, reason: 'naver_store' };
+
+  return { duplicate: false };
+}
+
+function rememberExistingKeys_(row, existing) {
+  const brandKey = normalizeBrandName_(row.brandName);
+  const duplicateBrandKey = normalizeBrandDuplicateKey_(row.brandName);
+  const urlKey = normalizeUrlKey_(row.brandUrl);
+  const storeId = naverStoreId_(row.brandUrl);
+  if (brandKey) existing.brands[brandKey] = true;
+  if (duplicateBrandKey) existing.brandDuplicateKeys[duplicateBrandKey] = true;
+  if (urlKey) existing.urlKeys[urlKey] = true;
+  if (storeId) existing.storeIds[storeId] = true;
 }
 
 function appendDiscoveredRows_(sheet, columns, rows) {
@@ -742,7 +781,7 @@ function appendFallbackSeedRows_(sheet, columns, exclusions) {
     };
     summary.scanned += 1;
 
-    if (existing.storeIds[storeId]) continue;
+    if (findExistingDuplicate_(row, existing).duplicate) continue;
 
     const exclusion = exclusions.isExcluded(row);
     if (exclusion.excluded) {
@@ -759,7 +798,7 @@ function appendFallbackSeedRows_(sheet, columns, exclusions) {
     }
 
     rows.push(row);
-    existing.storeIds[storeId] = true;
+    rememberExistingKeys_(row, existing);
   }
 
   index = (index + Math.max(summary.scanned, CONFIG.batchSize)) % DISCOVERY_FALLBACK_STORES.length;
@@ -1239,6 +1278,13 @@ function normalizeBrandName_(value) {
     .toLowerCase()
     .replace(/\(주\)|주식회사|㈜/g, '')
     .replace(/[^\p{L}\p{N}]/gu, '')
+    .trim();
+}
+
+function normalizeBrandDuplicateKey_(value) {
+  return normalizeBrandName_(cleanBrandTitle_(value))
+    .replace(/공식브랜드스토어|브랜드스토어|스마트스토어|공식스토어|공식몰|본사몰|공식|스토어|온라인|본사|대리점/g, '')
+    .replace(/\d+년연속|\d+위|판매\d*위|판매자|우수셀러/g, '')
     .trim();
 }
 
